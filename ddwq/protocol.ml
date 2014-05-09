@@ -22,8 +22,11 @@ end
 
 
 
-module MasterHeartbeat = struct
-  type t = ImAlive
+module MasterMonitorComm = struct
+  type t =  | ImAlive 
+            | YouAreNewHead | YouAreNewTail 
+            | YouHaveNewPrevNode of ((string * int) * int) | YouHaveNewNextNode of (string * int)
+            | OnSeqNumber of int
 
   include Marshaller
 end

@@ -9,9 +9,11 @@ let () =
       empty
       +> flag "-addresses" (optional_with_default "addresses.txt" string)
          ~doc:"filename the file with the worker addresses"
+      +> flag "-port" (optional_with_default 31101 int)
+         ~doc:"filename the file with the worker addresses"
       
     )
-    (fun addresses () ->
+    (fun addresses port_to_con () ->
 
      try_with ( fun () -> (Tcp.connect (Tcp.to_host_and_port "localhost" 33333)) )
       >>= function
@@ -23,7 +25,7 @@ let () =
                         let module MSRes = MasterServiceResponse in
                         let module MSAck = MasterServiceAck in
 
-                         try_with (fun () -> return (MSReq.send w (MSReq.InitRequest(Unix.gethostname(),31103)  )))
+                         try_with (fun () -> return (MSReq.send w (MSReq.InitRequest(Unix.gethostname(),port_to_con)  )))
                          >>= function
                              | Core.Std.Result.Error e -> (print_endline ("[ERROR] Failed " ^ ""));
                                             return ()

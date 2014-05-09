@@ -98,6 +98,12 @@ let get_head_node () : node =
   res
 
 
+let nodes_are_equal (node1 : node) (node2:node) : bool = 
+  let node1id = get_node_id node1 in
+  let node2id = get_node_id node2 in
+  if node1id = node2id then true else false
+
+
 let chain_exists () : bool = 
   (*(Mutex.lock state_mutex);*)
   let exists = !state.!chain_size > 0 in
@@ -116,6 +122,12 @@ let test_and_set_pending_tail () : bool =
   (*(Mutex.unlock state_mutex);*)
   succ
 
+
+(***********************************************************)
+(* MASTER-SERVICE FUNCTIONS                                *)
+(***********************************************************)
+
+
 let rec when_should_terminate () = 
   (Ivar.read should_terminate) >>| fun _ -> ()
 
@@ -129,6 +141,7 @@ let print_chain_structure () =
     else begin
       let head_key = get_node_id (get_head_node()) in
       let rec print_structure key = 
+        (*(debug INFO ("Looking up ID" ^ node_id_to_string key));*)
         let found_entry = Hashtbl.find chain key in
         let (_, this, next) = found_entry in
         (output_string := !output_string ^ "\t" ^ (node_to_string this) ^ " -->\n");
@@ -146,8 +159,155 @@ let print_chain_structure () =
     (*(Mutex.unlock state_mutex)*)
     
 
+let restructure_chain_for_failed_node (node:node) = 
+  (*First see where in the chain this node is*)
+  (*(Mutex.lock state_mutex);*)
+  let curr_head = get_head_node() in
+  let curr_tail = get_tail_node() in
+  if nodes_are_equal node curr_head then begin
+      (*The head has failed*)
+      debug WARN (node_to_string node ^ " Was the head node. Craving some more head =P");
+      (*Find the next node in the chain (the one after the head)*)
+      let dead_head_table_entry = Hashtbl.find chain (get_node_id curr_head) in
+      let (_, dead_head_node, dead_head_next) = dead_head_table_entry in
+
+      (* Sanity check to make sure that we have more nodes in the chain. If we don't we have a serious problem lol *)
+      if (is_none dead_head_next) then begin
+        (* ..... We're fucked *)
+        debug FATAL ("Houston we have a serious fucking problem. Our chain.... it's just...gone");
+        (Ivar.fill_if_empty should_terminate "All replicas have failed");
+        
+        (*(Mutex.unlock state_mutex);*)
+        return() (*Returning should get rid of the socket connection dispatched to the failed node*)
+
+      end
+      else begin
+        (*This is the exepcted scenario, message the next node in the chain to alter it of its new position*)
+        let new_head_node = get_some dead_head_next in
+        let module MSMonitor = MasterMonitorComm in
+        (MSMonitor.send (get_node_writer new_head_node) MSMonitor.YouAreNewHead);
+
+        !state.chain_size := !state.!chain_size - 1;
+        !state.head_node := Some(new_head_node);
+        let (_,new_head,new_head_next) = Hashtbl.find chain (get_node_id new_head_node) in
+        Hashtbl.replace chain (get_node_id new_head_node) (None,new_head,new_head_next);
+        Hashtbl.remove chain (get_node_id node);
+
+
+        (*(Mutex.unlock state_mutex);*)
+        return()
+      end
+  end (*case of head*)
+
+  else begin
+    if nodes_are_equal node curr_tail then begin
+      (*The tail has failed*)
+      debug WARN (node_to_string node ^ " Was the tail node. Need another bottom bitch");
+      (*Find the prev node in the chain (the one before the tail)*)
+      let dead_tail_table_entry = Hashtbl.find chain (get_node_id curr_tail) in
+      let (dead_tail_prev, dead_tail_node, _) = dead_tail_table_entry in
+
+      (* Sanity check to make sure that we have more nodes in the chain. If we don't we have a serious problem lol *)
+      if (is_none dead_tail_prev) then begin
+        (* ..... We're fucked *)
+        debug FATAL ("Houston we have a serious fucking problem. Our chain.... it's just...gone");
+        (Ivar.fill_if_empty should_terminate "All replicas have failed");
+        
+
+        (*(Mutex.unlock state_mutex);*)
+        return() (*Returning should get rid of the socket connection dispatched to the failed node*)
+
+      end
+      else begin
+        (*This is the exepcted scenario, message the next node in the chain to alter it of its new position*)
+        let new_tail_node = get_some dead_tail_prev in
+        let module MSMonitor = MasterMonitorComm in
+        (MSMonitor.send (get_node_writer new_tail_node) MSMonitor.YouAreNewTail);
+        !state.chain_size := !state.!chain_size - 1;
+        !state.tail_node := Some(new_tail_node);
+        let (new_tail_prev,new_tail,_) = Hashtbl.find chain (get_node_id new_tail_node) in
+        Hashtbl.replace chain (get_node_id new_tail_node) (new_tail_prev,new_tail,None);
+        Hashtbl.remove chain (get_node_id node);
+
+        (*(Mutex.unlock state_mutex);*)
+        return()
+      end
+    end (*case of tail tail node*)
+
+    else begin
+      (*No need to check if prev/succ exists since this is a middle node*)
+      (*This is hard.... we need to handle this*)
+      debug WARN (node_to_string node ^ " Was the a middle node. Cutting it out of the chain");
+      (*Find the prev node in the chain (the one before the tail)*)
+      let dead_mid_table_entry = Hashtbl.find chain (get_node_id node) in
+      let (dead_mid_prev, dead_mid_node, dead_mid_next) = dead_mid_table_entry in
+      let prev_node = get_some dead_mid_prev in
+      let next_node = get_some dead_mid_next in
+      let module MSMonitor = MasterMonitorComm in
+
+      (*Send message to the prev node indicating that it has a new next node*)
+      (MSMonitor.send (get_node_writer prev_node) (MSMonitor.YouHaveNewNextNode(get_node_id next_node)));
+
+
+
+      (*Can't do this since the reader is allready in use by the monitor function
+        we need to find some way around this issue... for now just ignore the fact
+        and send the dead_node's prev node the address of the dead_node's next node
+        and all communication will happen between them. This results in a dumb master
+        but should work nonetheless*)
+
+      (*let rec do_receive_seq () = 
+          MSMonitor.receive (get_node_reader prev_node)
+          >>= function
+            | `Eof -> begin
+              debug FATAL ("Failed to get seq number of dead node's previous link");
+              (Ivar.fill_if_empty should_terminate "Failed to get seq number"); 
+              return()
+            end
+            | `Ok MSMonitor.OnSeqNumber(seq_num) -> begin
+              debug INFO ("Got seq number of dead node's prev node. Seq = "  ^ string_of_int seq_num);
+              (MSMonitor.send (get_node_writer next_node) (MSMonitor.YouHaveNewPrevNode((get_node_id prev_node),seq_num)));
+
+              !state.chain_size := !state.!chain_size - 1;
+              let (p',_,_) = Hashtbl.find chain (get_node_id prev_node) in
+              Hashtbl.replace chain (get_node_id prev_node) (p',prev_node,dead_mid_next);
+
+              let (_,_,n') = Hashtbl.find chain (get_node_id next_node) in
+              Hashtbl.replace chain (get_node_id next_node) (dead_mid_prev,next_node,n');
+
+              Hashtbl.remove chain (get_node_id node);
+
+              return()
+            end
+            | _ -> begin
+              debug ERROR "Got unexpected message. Wanted sequence number, waiting for another message.";
+              do_receive_seq()
+            end
+      in
+      do_receive_seq()*)
+
+      (*This is a temporary workaround.... Not sure how well this actually works though.*)
+      (*The -1 is a placeholder for the epected sequence number...*)
+      (MSMonitor.send (get_node_writer next_node) (MSMonitor.YouHaveNewPrevNode((get_node_id prev_node),-1)));
+      !state.chain_size := !state.!chain_size - 1;
+      let (p',_,_) = Hashtbl.find chain (get_node_id prev_node) in
+      Hashtbl.replace chain (get_node_id prev_node) (p',prev_node,dead_mid_next);
+
+      let (_,_,n') = Hashtbl.find chain (get_node_id next_node) in
+      Hashtbl.replace chain (get_node_id next_node) (dead_mid_prev,next_node,n');
+
+      Hashtbl.remove chain (get_node_id node);
+
+      return()
+
+
+    end (*case of middle*)
+  end (*case of not head*)
+
+
+
 let monitor_node (node : node) = 
-  let module MSHeartbeat = MasterHeartbeat in
+  let module MSHeartbeat = MasterMonitorComm in
   (*let node_id = get_node_id node in*)
   let r = get_node_reader node in
   let rec do_monitor () = 
@@ -156,9 +316,10 @@ let monitor_node (node : node) =
       | `Eof -> begin
         debug WARN (node_to_string node ^ " Has died a horrible death");
         (* TODO -- Chnage this to do something useful *)
-        never ()
+        (*never ()*)
+        restructure_chain_for_failed_node node 
       end
-      | `Ok MSHeartbeat.ImAlive -> begin (*This is pretty useless. Since nodes are fail-stop `Eof will always trigger*)
+      | `Ok _ -> begin (*This is pretty useless. Since nodes are fail-stop `Eof will always trigger*)
         do_monitor()
       end
   in
@@ -402,7 +563,7 @@ let () =
 
             (* Begin *)
             Deferred.all [
-              ((after (Core.Std.sec 150.0)) >>= fun _ -> (Ivar.fill_if_empty should_terminate "Timed out"); (return 0)) ;
+              (*((after (Core.Std.sec 150.0)) >>= fun _ -> (Ivar.fill_if_empty should_terminate "Timed out"); (return 0)) ;*)
               
               (begin_listening_service_on_port port_num) ;
               ((when_should_terminate()) >>= fun _ -> return 0)
@@ -410,19 +571,9 @@ let () =
 
           end);
         end
-        >>= fun exit_codes -> (print_int_list exit_codes); (after (Core.Std.sec 5.0)) >>| fun _ -> (Async.Std.shutdown (List.hd exit_codes))
+        >>= fun exit_codes -> (*(print_int_list exit_codes);*) (after (Core.Std.sec 5.0)) >>| fun _ -> (Async.Std.shutdown (List.hd exit_codes))
         
       
     )
   |> Command.run
 
-
-
- (*!state.num_alive_replicas := !state.num_alive_replicas + 1;
-                
-
-                every ~stop:(when_should_terminate()) (Core.Std.sec 1.0) (
-                  fun () -> 
-                  debug INFO "Sending heartbeat";
-                  ()
-                );*)

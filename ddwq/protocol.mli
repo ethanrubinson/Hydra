@@ -23,8 +23,11 @@ end
 (** { DDWQ Protocol } **)
 (***********************)
 
-module MasterHeartbeat: sig
-  type t = ImAlive
+module MasterMonitorComm: sig
+  type t =  |ImAlive 
+            | YouAreNewHead | YouAreNewTail 
+            | YouHaveNewPrevNode of ((string * int) * int) | YouHaveNewNextNode of (string * int)
+            | OnSeqNumber of int
 
   include Marshalable with type t := t
 end
@@ -42,7 +45,9 @@ module MasterServiceRequest : sig
 end
 
 module MasterServiceResponse : sig
-  type t = FirstChainMember | NewTail | PrepareNewTail of (string * int) | InitDone | InitFailed
+  type t =  |FirstChainMember 
+            | NewTail | PrepareNewTail of (string * int) 
+            | InitDone | InitFailed
 
   include Marshalable with type t := t
 end
