@@ -7,39 +7,39 @@ open Socket
 (* STATE VARS                                              *)
 (***********************************************************)
 
-type ip_address = string
+type ip_address     = string
 type listening_port = int
+
 type master_connection = Async_extra.Import.Socket.Address.Inet.t * Async_extra.Import.Reader.t * Async_extra.Import.Writer.t
-type node_id = ip_address * listening_port
-type node = master_connection * node_id
+
+type node_id  = ip_address * listening_port
+type node     = master_connection * node_id
 
 type next_node    = node option
 type prev_node    = node option 
-type chain_table_entry = prev_node * node * next_node
-type chain_table = (node_id , chain_table_entry) Hashtbl.t
+
+type chain_table_entry  = prev_node * node * next_node
+type chain_table        = (node_id , chain_table_entry) Hashtbl.t
 
 let (chain : chain_table) = Hashtbl.create 10
 
-
-
 type chain_state = {
-  port : int ref;
+  port      : int ref;
   head_node : node option ref;
   tail_node : node option ref;
-  pending_new_tail : bool ref;
-  chain_size : int ref;
+
+  pending_new_tail  : bool ref;
+  chain_size        : int ref;
 }
 
 let state = ref {
-  port = ref (-1);
+  port      = ref (-1);
   head_node = ref None;
   tail_node = ref None;
-  pending_new_tail = ref false;
-  chain_size = ref 0;
-  }
 
-
-
+  pending_new_tail  = ref false;
+  chain_size        = ref 0;
+}
 
 let should_terminate = Ivar.create()
 let state_mutex = Mutex.create()
