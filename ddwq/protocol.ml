@@ -20,6 +20,33 @@ end
 (** { Protocol messages} *)
 (*************************)
 
+
+
+module MasterHeartbeat = struct
+  type t = ImAlive
+
+  include Marshaller
+end
+
+module MasterServiceAck = struct
+  type t = FirstChainMemberAck | NewTailAck
+
+  include Marshaller
+end
+
+module MasterServiceRequest = struct
+  type t = InitRequest of (string * int)  (*hostname * listening port *)
+
+  include Marshaller
+end
+
+module MasterServiceResponse = struct
+  type t = FirstChainMember | NewTail | PrepareNewTail of (string * int) | InitDone | InitFailed
+
+  include Marshaller
+end
+
+
 module SlaveRequest (Work : Ddwq.WorkType) = struct
   type t = DoWorkRequest of Work.input
 

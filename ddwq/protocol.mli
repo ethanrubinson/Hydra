@@ -23,6 +23,31 @@ end
 (** { DDWQ Protocol } **)
 (***********************)
 
+module MasterHeartbeat: sig
+  type t = ImAlive
+
+  include Marshalable with type t := t
+end
+
+module MasterServiceAck : sig
+  type t = FirstChainMemberAck | NewTailAck
+
+  include Marshalable with type t := t
+end
+
+module MasterServiceRequest : sig
+  type t = InitRequest of (string * int)
+
+  include Marshalable with type t := t
+end
+
+module MasterServiceResponse : sig
+  type t = FirstChainMember | NewTail | PrepareNewTail of (string * int) | InitDone | InitFailed
+
+  include Marshalable with type t := t
+end
+
+
 (** Messages from the master to the slave *)
 module SlaveRequest (Work : Ddwq.WorkType) : sig
   type t = DoWorkRequest of Work.input
