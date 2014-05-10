@@ -3,9 +3,12 @@ open Debug
 open Work_full
 open Protocol
 open Async_unix
+open AQueue
 (***********************************************************)
 (* STATE VARS                                              *)
 (***********************************************************)
+
+type which = NEXT | PREV
 
 type ip_address     = string
 type listening_port = int
@@ -59,8 +62,22 @@ let state = ref {
 }
 
 
+let history = ref []
+let last_acked_seq_num_received = ref (-1)
+let last_sent_seq_num = ref (-1)
+
 (*let should_terminate = Ivar.create()*)
 let should_send_new_tail_ack = Ivar.create()
+
+
+let should_terminate_current_next_conn = ref (Ivar.create())
+let next_conn_terminated = ref (Ivar.create())
+
+let should_terminate_current_prev_conn = ref (Ivar.create())
+let prev_conn_terminated = ref (Ivar.create())
+
+
+let our_state_mutex = Mutex.create()
 
 (***********************************************************)
 (* UTILITY FUNCTIONS                                       *)
@@ -128,32 +145,207 @@ let close_socket_and_do_func m f =
   ((after (Core.Std.sec (Random.float 5.0))) >>= fun _ -> f())
 
 
+let launch_client_listening_service () = never()
+
+let rec listen_to_the_chain which () = 
+  let module ChainReq = ChainComm_ReplicaNodeRequest in
+  let module ChainRes = ChainComm_ReplicaNodeResponse in
+  (*We are the head. We might be the tail*)
+
+
+                            if which = NEXT then begin 
+                              Mutex.lock our_state_mutex;
+                              let ((a',r',w'),_) = get_some !state.!next_node in
+                              Mutex.unlock our_state_mutex;
+
+                              debug INFO ("Waiting on message from next node.");
+                              ChainReq.receive r'
+                              >>= function
+                                | `Eof -> begin 
+                                  debug ERROR ("Error receving message from next node. Retrying.");
+                                  return()
+                                end
+                                | `Ok msg -> begin 
+                                    match msg with
+                                    | ChainReq.TakeThisACK (seq_num_ack) -> begin 
+                                      Mutex.lock our_state_mutex;
+                                      debug INFO ("Got an ACK for SEQ#= " ^ string_of_int seq_num_ack);
+                                      last_acked_seq_num_received := seq_num_ack;
+
+                                      (if !state.!am_head then begin 
+                                        debug INFO ("We are the head. Just recording the ACK. Nothing else");
+                                      end 
+                                      
+                                      else begin    
+                                        debug INFO ("We are a middle node. Sending the ACK to our prev node");
+                                        
+                                        let (a,r,w) = get_some !state.!prev_node in
+                                        ChainReq.send w (ChainReq.TakeThisACK(seq_num_ack));
+                                      end); 
+
+                                      Mutex.unlock our_state_mutex;
+                                      return()
+                                    end 
+                                    | _ -> begin 
+                                      debug ERROR "Got a message that was not TakeThisACK";
+                                      return()
+                                    end
+                                end
+                                >>= fun _ ->
+                                if (Ivar.is_full (!should_terminate_current_next_conn)) then return() else listen_to_the_chain NEXT ()
+
+                            end (*of case monitor NEXT*)
+else begin 
+    (*We are either the tail or a mid node either way this is the same*)
+    Mutex.lock our_state_mutex;
+    let (addr,r,w) = get_some !state.!prev_node in
+    Mutex.unlock our_state_mutex;
+
+    debug INFO ("Listening for message from prev node.");
+    ChainReq.receive r
+    >>= function
+      | `Eof -> begin 
+        debug ERROR ("Error receving message from prev node. Retrying.");
+        return()
+      end
+      | `Ok msg -> begin 
+          match msg with
+          | ChainReq.UpdateYourHistory(seq_num, hist) -> begin 
+            (*We're the tail. Now we have our history. Let the Master-Service know we are ready to rumble*)
+            Mutex.lock our_state_mutex;
+            debug INFO ("Updating our history to SEQ#= " ^ string_of_int seq_num);
+            last_acked_seq_num_received := seq_num;
+            last_sent_seq_num := seq_num;
+            history := hist;
+            Mutex.unlock our_state_mutex;
+            debug INFO "Sync completed. Alerting master we are ready to go";
+            Ivar.fill_if_empty should_send_new_tail_ack "Yes";
+            return()
+          end
+          | ChainReq.TakeThisUpdate (seq_num_to_send, update) -> begin 
+            Mutex.lock our_state_mutex;
+            debug INFO ("Got an update with SEQ#= " ^ string_of_int seq_num_to_send ^ " and UPDATE=" ^ update);
+            history := update :: !history;
+
+            (*we are not the head but we are the tail*)
+            (if !state.!am_tail then begin 
+              debug INFO ("We are the tail. Updating LastACKRecved and LastSentACK and sending an ACK response");
+              last_acked_seq_num_received := seq_num_to_send;
+              last_sent_seq_num := seq_num_to_send;
+              ChainReq.send w (ChainReq.TakeThisACK(seq_num_to_send));
+            end 
+            (*We are neither the head or tail*)
+            else begin    
+              debug INFO ("We are not the tail. Updating LastSentACK (and send the message onwards)");
+              last_sent_seq_num := seq_num_to_send;
+              let ((a',r',w'),_) = get_some !state.!next_node in
+              ChainReq.send w' (ChainReq.TakeThisUpdate(seq_num_to_send,update));
+            end); 
+
+            Mutex.unlock our_state_mutex;
+            return()
+          end 
+          | ChainReq.SyncDone -> begin 
+            debug INFO "Sync completed. Alerting master we are ready to go";
+            Ivar.fill_if_empty should_send_new_tail_ack "Yes";
+            return()
+          end
+          | _ -> begin 
+            debug ERROR "Got a message we should not have";
+            return()
+          end 
+      end
+      >>= fun _ ->
+      if (Ivar.is_full !should_terminate_current_prev_conn) then return() else listen_to_the_chain PREV ()
+end (*Case  monitor PREV*)
+
 
 let rec prepare_new_tail_node ip port () = 
-  debug INFO ("Connecting to our new tail node... @" ^ ip ^ ":" ^ string_of_int port);
+  (*Alert any eisting connections know they should terminate*)
+  Ivar.fill_if_empty (!should_terminate_current_next_conn) (*"YES"*)();
+  (*Wait for the connection to terminate. If this is the first instance. It is bypassed by the fill of NO CONNECTION*)
+  Ivar.read !next_conn_terminated >>= fun _ ->
+  (*Re-create them to block the next connection from coming in*)
+  should_terminate_current_next_conn := Ivar.create();
+  next_conn_terminated := Ivar.create();
+
+
+  debug INFO ("Connecting to our new next (tail) node @" ^ ip ^ ":" ^ string_of_int port);
   try_with ( fun () -> (Tcp.connect (Tcp.to_host_and_port ip port)) )
   >>= function
     | Core.Std.Result.Error e -> begin 
-      debug ERROR "Failed to connect to our tail. Retry in 5 seconds";
-      ((after (Core.Std.sec 5.0)) >>= fun _ -> (prepare_new_tail_node ip port ()))
+      debug ERROR ("Failed to connect node @" ^ ip ^ ":" ^ string_of_int port ^ ". Retrying in 5 seconds");
+      ((after (Core.Std.sec 5.0)) >>= fun _ -> Ivar.fill_if_empty (!next_conn_terminated) "NO CONNECTION"; (prepare_new_tail_node ip port ()))
     end
     | Core.Std.Result.Ok m -> begin
-      debug INFO "Connected to our tail node!";
 
       (* Finish initializing the state with info about the connection *)
       let (a,r,w) = m in
-      !state.next_node := Some((a,r,w),(ip,port));
-
+      (*!state.next_node := Some((a,r,w),(ip,port));*) (*Change... see below*)
       let module ChainReq = ChainComm_ReplicaNodeRequest in
       let module ChainRes = ChainComm_ReplicaNodeResponse in
 
+      debug INFO "Connected to our next (tail) node. Sending GetReadyToSync packet";
+      ChainReq.send w (ChainReq.GetReadyToSync);
 
-      (* Get our initialization type from the master. This is either FirstChainMember or NewTail*)
-      debug INFO "Sending initialization packet";
-      ChainRes.send w (ChainRes.HaveAnUpdate);
-      never()
+
+      debug INFO "Waiting for DoSyncForState packet.";
+      ChainRes.receive r
+      >>= function
+        | `Eof -> begin 
+          debug ERROR "Failed to receive DoSyncForState. Resetting connection and retrying in 5 seconds.";
+          ((after (Core.Std.sec 5.0)) >>= fun _ -> Ivar.fill_if_empty (!next_conn_terminated) "NO CONNECTION"; (prepare_new_tail_node ip port ()))
+        end
+        | `Ok res -> begin 
+          match res with 
+          | ChainRes.DoSyncForState(next_node_state,next_node_last_sent) -> begin
+
+            (
+              (debug INFO ("Got DoSyncForState. Next node has STATE=" ^ string_of_int next_node_state ^ " | SENT_T+=" ^ string_of_int next_node_last_sent));
+              (debug INFO ("Waiting on state_mutex so we can get our last_acked_seq_num to sync our new tail"));
+              Mutex.lock our_state_mutex;
+              !state.next_node := Some((a,r,w),(ip,port));
+              !state.am_tail := false;
+              
+              (debug INFO ("Got the lock. We have STATE=" ^ string_of_int !last_acked_seq_num_received ^ " | SENT_T+=" ^ string_of_int !last_sent_seq_num));
+
+              (*Check to see if the next_node_state is less than ours | Can only happen if we are the current tail*)
+              (if next_node_state < !last_acked_seq_num_received then begin 
+              
+                debug INFO ("State of next < ours. It must be a new node that needs to be sent our history. Sending history @ STATE=" ^ string_of_int !last_acked_seq_num_received);
+                ChainReq.send w (ChainReq.UpdateYourHistory(!last_acked_seq_num_received, !history));
+                
+                (*At this point the tail should be ready to go. It should send its ACK*)
+                
+                debug INFO "Releasing the lock. We have finished initializing our new tail.";
+               
+                (*DOMONITORNEXT*)
+              end
+              else begin 
+                debug INFO ("State of next >= ours. Sending SyncDone");
+                ChainReq.send w (ChainReq.SyncDone);
+                
+
+              end);
+              Mutex.unlock our_state_mutex;
+            );
+            (*Don't close the socket to our next node until we are told to*)        
+            listen_to_the_chain NEXT () 
+            (*At this point our tail is guarenteed to have THEIR:STATE > OUR:STATE ie. their:last_acked_seq_num > our:last_acked_seq_num*)
+          
+          end
+          
+        end
+
+
+          
+      >>= fun _ ->
+        (Ivar.fill_if_empty (!next_conn_terminated) "Yes");
+        return ()
       end
 
+
+(*This is only called once. Only one server can be created on the listening port*)
 let rec init_as_new_tail () = 
   let module ChainReq = ChainComm_ReplicaNodeRequest in
   let module ChainRes = ChainComm_ReplicaNodeResponse in
@@ -164,26 +356,47 @@ let rec init_as_new_tail () =
     (fun addr r w  ->
       (*let chain_connection = (addr,r,w) in*)
       let addr_string = Socket.Address.to_string addr in
-      debug INFO ("[" ^ addr_string ^ "] Connection established with our prev node. Starting session");
+      debug INFO ("[" ^ addr_string ^ "] Connection established with our new prev node. Waiting for curren prev conn (if it exists) to end.");
       
-      !state.prev_node := Some((addr,r,w));
-
-      ChainRes.receive r
+      (*Alert any eisting connections know they should terminate*)
+      Ivar.fill_if_empty (!should_terminate_current_prev_conn) "YES";
+      (*Wait for the connection to terminate. If this is the first instance. It is bypassed by the fill of NO CONNECTION*)
+      Ivar.read !prev_conn_terminated >>= fun _ ->
+      (*Re-create them to block the next connection from coming in*)
+      should_terminate_current_prev_conn := Ivar.create();
+      prev_conn_terminated := Ivar.create();
+      debug INFO ("[" ^ addr_string ^ "] Session started. Waiting on message.");
+      
+      ChainReq.receive r
       >>= function
         | `Eof -> begin 
-          debug ERROR ("[" ^ addr_string ^ "] Socket was closed by our prev node. Terminating session.");
+          debug ERROR ("[" ^ addr_string ^ "] Socket was closed by our new prev node. Terminating session.");
           return ()
         end
         | `Ok msg -> begin 
             match msg with
-              | ChainRes.HaveAnUpdate -> begin 
-                debug INFO ("Initialization with prev node successful!");
-                (Ivar.fill_if_empty should_send_new_tail_ack "Yes");
+              | ChainReq.GetReadyToSync -> begin 
+                debug INFO ("Got ReadyToSync packet from our new prev node.");
+                debug INFO ("Waiting on state_mutex so we can respond with our state and seq#.");
+                Mutex.lock our_state_mutex;
+                !state.prev_node := Some((addr,r,w));
+                !state.am_head := false; (*We shouldn't have to do this but it makes everything look nice*)
+                debug INFO ("Got the lock. We have STATE=" ^ string_of_int !last_acked_seq_num_received ^ " | SENT_T+=" ^ string_of_int !last_sent_seq_num);
 
-                never()
-              end (* Match InitReq *)
-              | _ -> debug INFO ("Got a weird message ????"); never()
 
+                ChainRes.send w (ChainRes.DoSyncForState(!last_acked_seq_num_received,!last_sent_seq_num));
+                Mutex.unlock our_state_mutex;
+                
+                (*Don't close the socket to our next node until we are told to*)   
+                listen_to_the_chain PREV ()     
+                >>= fun _ ->
+                  (Ivar.fill_if_empty (!prev_conn_terminated) "Yes");
+                  return ()
+              end (* Match GetReadyToSync *)
+              | _ -> begin 
+                debug INFO ("Got a weird message ????. Terminating session");
+                return()
+              end
         end
 
     )
@@ -211,6 +424,7 @@ let rec begin_master_service_listening_service a r w =
       (match mointor_result with 
         | MSMonitor.PrepareNewTail(ip, port) -> begin 
           debug INFO "Motherfucking jones.... we're getting a tail! How damn exciting!";
+          Ivar.fill_if_empty (!next_conn_terminated) "NO CONNECTION";
           don't_wait_for(prepare_new_tail_node ip port ());
         end
         | MSMonitor.YouHaveNewPrevNode(_) -> begin 
@@ -331,6 +545,7 @@ let rec begin_master_connection master_ip master_port () =
 
 
               (*Listening service start here *)
+              Ivar.fill_if_empty (!prev_conn_terminated) "NO CONNECTION";
               don't_wait_for(init_as_new_tail ());
               (Ivar.read should_send_new_tail_ack) 
               >>= fun _ ->
@@ -408,4 +623,90 @@ let () =
     )
   |> Command.run
 
+
+(*(Ivar.fill_if_empty should_send_new_tail_ack "Yes");*)
+
+
+
+(* Wait for message from our next (tail) node identifying what its last_acked_seq number is *)
+
+
+      (*let rec bring_new_tail_up_to_date () = 
+      debug INFO "Waiting on SequenceNumberRequest";
+      ChainReq.receive r
+      >>= function
+        | Core.Std.Result.Error e -> begin 
+          debug FATAL "Failed to receive SequenceNumberRequest. Retrying";
+          bring_new_tail_up_to_date ()
+        end
+        | Core.Std.Result.Ok res -> begin 
+          match res with
+            | ChainReq.SequenceNumberRequest(i) -> begin 
+              debug INFO ("Our next (tail) node is on SEQ#=" ^ string_of_int i);
+
+              (*Check to see if we are at a low sequence number. If we are update ourselves*)
+              (if (!on_seq_number < i) then begin 
+                on_seq_number := i
+                (*TODO remove seq#'s < i from Sent_T*)
+              end);
+
+              debug INFO ("Sending update for SEQ#=" ^ string_of_int (i+1));
+              
+              let curr_sent = !sent_T in
+              let seq_res = (List.hd (List.filter (fun elem -> let (seq_num,data) = elem in seq_num = (i + 1)) curr_sent)) in
+              (*We need to wait for this seq_res to be available*)
+              ChainRes.send w (ChainRes.SequenceNumberResponse(seq_res));
+              bring_new_tail_up_to_date ()
+            end
+            | _ -> begin 
+              debug WARN "Got resonse other than SequenceNumberRequest???";
+              bring_new_tail_up_to_date ()
+            end
+        end
+      in
+      bring_new_tail_up_to_date()*)
+
+
+
+
+
+(*debug INFO ("Begin to bring self up to date! Sending notice we are on SEQ#=" ^ string_of_int !on_seq_number);
+                let rec bring_self_up_to_date () = 
+                let up_to_date_as_of_seq_num = !on_seq_number in 
+                ChainReq.send w ChainReq.SequenceNumberRequest(up_to_date_as_of_seq_num);
+
+                debug INFO "Waiting on SequenceNumberResponse";
+                ChainRes.receive r
+                >>= function
+                  | Core.Std.Result.Error e -> begin 
+                    debug FATAL "Failed to receive SequenceNumberRequest. Retrying";
+                    bring_self_up_to_date ()
+                  end
+                  | Core.Std.Result.Ok res -> begin 
+                    match res with
+                      | ChainRes.SequenceNumberResponse(i,data) -> begin 
+                        debug INFO ("Got update with for SEQ#=" ^ string_of_int i);
+                        
+                        (*Sanity check*)
+                        if (i = up_to_date_as_of_seq_num + 1) then begin
+
+                          sent_T := !sent_T @ [(i,data)];
+                          (*TODO Send this update to OUR tail*)
+                          on_seq_number := i;
+                          bring_self_up_to_date ()
+                        end
+                        else begin
+                          debug WARN "Got an out of order SEQ#=" ^ string_of_int i ^ ". Wanted SEQ#=" ^ string_of_int (up_to_date_as_of_seq_num + 1); 
+                          bring_self_up_to_date ()
+                        end
+                        
+                        
+                      end
+                      | _ -> begin 
+                        debug WARN "Got resonse other than SequenceNumberRequest???";
+                        bring_self_up_to_date ()
+                      end
+                  end
+                in
+                bring_self_up_to_date()*)
 

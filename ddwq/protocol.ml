@@ -21,13 +21,18 @@ end
 (*************************)
 
 module ChainComm_ReplicaNodeRequest = struct
-  type t = SequenceNumberRequest of int  (*hostname * listening port *)
+  type t =  | GetReadyToSync
+            | SyncDone
+            | UpdateYourHistory of (int * string list) (*Seq num , History for seq num*)
+            | TakeThisUpdate of (int * string)
+            | TakeThisACK of (int)
+
 
   include Marshaller
 end
 
 module ChainComm_ReplicaNodeResponse = struct
-  type t = SequenceNumberReponse of int | HaveAnUpdate
+  type t = DoSyncForState of ((*Last acked seq num/current data state*)int *(*last sent seq number to T+*)int)
 
   include Marshaller
 end
