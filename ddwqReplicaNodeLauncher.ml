@@ -24,6 +24,9 @@ type ('a, 'b) self_node = ('a, 'b) master_connection * node_id
 
 
 type ('a, 'b) node_state = {
+  am_head : bool ref;
+  am_tail : bool ref;
+
   master_ip   : string ref;
   master_port : int ref;
   chain_port  : int ref;
@@ -39,6 +42,9 @@ type ('a, 'b) node_state = {
 }
 
 let state = ref {
+  am_head = ref false;
+  am_tail = ref false;
+
   master_ip   = ref "";
   master_port = ref (-1);
   chain_port  = ref (-1);
@@ -112,9 +118,6 @@ let print_visible_state () =
       output_string := !output_string ^ "NEXT=" ^(next_node_to_string nn) ^ " -->\n";
     end);
 
-
-     
-
     debug INFO ("Visible Chain Structure :" ^ !output_string)
 
 
@@ -122,7 +125,7 @@ let close_socket_and_do_func m f =
   (Socket.shutdown m `Both);
   !state.mconn := None;
   !state.self  := None;
-  ((after (Core.Std.sec 5.0)) >>= fun _ -> f())
+  ((after (Core.Std.sec (Random.float 5.0))) >>= fun _ -> f())
 
 
 
@@ -205,20 +208,37 @@ let rec begin_master_service_listening_service a r w =
       close_socket_and_do_func a (return)
     end
     | `Ok mointor_result -> begin
-      match mointor_result with 
+      (match mointor_result with 
         | MSMonitor.PrepareNewTail(ip, port) -> begin 
           debug INFO "Motherfucking jones.... we're getting a tail! How damn exciting!";
-
-
           don't_wait_for(prepare_new_tail_node ip port ());
-
-
-          begin_master_service_listening_service a r w
+        end
+        | MSMonitor.YouHaveNewPrevNode(_) -> begin 
+          debug INFO "We have a new prev node!";
+          (*TODO -- terminate the current connection*)
+          (*don't_wait_for(init_as_new_tail ());*)
+        end
+        | MSMonitor.YouHaveNewNextNode(ip,port) -> begin 
+          debug INFO "We have a new next node!";
+          (*TODO -- terminate the current connection*)
+          don't_wait_for(prepare_new_tail_node ip port ());
+        end
+        | MSMonitor.YouAreNewTail -> begin
+          debug INFO "We are the new tail!";
+          (*TODO -- terminate the current tail connection*)
+          !state.am_tail := true;
+          !state.next_node := None;
+        end
+        | MSMonitor.YouAreNewHead -> begin 
+          debug INFO "We are the new head!";
+          (*TODO -- terminate the current head connection*)
+          !state.am_head := true; 
+          !state.prev_node := None;
         end
         | _ -> begin 
-          debug INFO "Got some message that was not preparenewtail";
-          begin_master_service_listening_service a r w
-        end
+          debug ERROR "Got an unexpected message ???";
+        end);
+      begin_master_service_listening_service a r w
     end
 
 
@@ -228,7 +248,7 @@ let rec begin_master_service_listening_service a r w =
 
 let rec begin_master_connection master_ip master_port () = 
   debug INFO "Attempting to connect to Master-Service...";
-  try_with ( fun () -> (Tcp.connect (Tcp.to_host_and_port master_ip master_port)) )
+  try_with ( fun () -> (Tcp.connect ~timeout:(Core.Std.sec 0.1) (Tcp.to_host_and_port master_ip master_port)) )
   >>= function
     | Core.Std.Result.Error e -> begin 
       debug ERROR "Failed to connect to Master-Service. Retry in 5 seconds";
@@ -284,6 +304,7 @@ let rec begin_master_connection master_ip master_port () =
                     debug INFO "Our initialization request was successful. We are the first chain member";
                     
                     (* Ensure these are reset for sanity measures *)
+                    !state.am_head := true;
                     !state.next_node := None;
                     !state.prev_node := None;
 
@@ -316,6 +337,10 @@ let rec begin_master_connection master_ip master_port () =
               MSAck.send w MSAck.NewTailAck; (*Send the ACK indicating we have initialized ourselves successfully as the tail*)
               
               (*The additional InitDone from master was removed. It is unnecesary and just opens the door for concurrency issues*)
+
+              (* Ensure these are reset for sanity measures *)
+              !state.am_tail := true;
+              !state.next_node := None;
 
               begin_master_service_listening_service a r w
               (*never()  We shall just literally do nothing but keep the socket alive for now*)
