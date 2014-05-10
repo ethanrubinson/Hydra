@@ -1,4 +1,4 @@
 DDWQ
 ====
 
-DDWQ
+Distributed Deferred Work Queue
