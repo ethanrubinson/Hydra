@@ -332,6 +332,7 @@ let begin_listening_service_on_port p =
   let module MSReq = MasterServiceRequest in
   let module MSRes = MasterServiceResponse in
   let module MSAck = MasterServiceAck in
+  let module MSMonitor = MasterMonitorComm in
 
   Tcp.Server.create
     ~on_handler_error:`Raise
@@ -421,7 +422,7 @@ let begin_listening_service_on_port p =
                       let tail_id = get_node_id current_tail in
 
                       (MSRes.send w MSRes.NewTail);
-                      (MSRes.send (get_node_writer current_tail) (MSRes.PrepareNewTail(ip,port)));
+                      (MSMonitor.send (get_node_writer current_tail) (MSMonitor.PrepareNewTail(ip,port)));
 
                       (* Wait for ACK *)
                       MSAck.receive r 
@@ -450,7 +451,11 @@ let begin_listening_service_on_port p =
                           
                           
                           debug NONE ("New tail initialized = " ^ node_to_string new_chain_node ^ ".");
-                          (MSRes.send w MSRes.InitDone);
+                          
+                          (*This has been taken out for the momment. It is unecessary and may cause problems*)
+                          (*(MSRes.send w MSRes.InitDone);*)
+                          
+
                           (*(Mutex.unlock state_mutex);*)
 
 

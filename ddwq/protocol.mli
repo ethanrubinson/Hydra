@@ -23,11 +23,24 @@ end
 (** { DDWQ Protocol } **)
 (***********************)
 
-module MasterMonitorComm: sig
+module ChainComm_ReplicaNodeRequest : sig 
+  type t = SequenceNumberRequest of int  (*hostname * listening port *)
+
+  include Marshalable with type t := t
+end
+
+module ChainComm_ReplicaNodeResponse : sig
+  type t = SequenceNumberReponse of int | HaveAnUpdate
+
+  include Marshalable with type t := t
+end
+
+module MasterMonitorComm : sig
   type t =  |ImAlive 
             | YouAreNewHead | YouAreNewTail 
             | YouHaveNewPrevNode of ((string * int) * int) | YouHaveNewNextNode of (string * int)
             | OnSeqNumber of int
+            | PrepareNewTail of (string * int)
 
   include Marshalable with type t := t
 end
@@ -45,8 +58,7 @@ module MasterServiceRequest : sig
 end
 
 module MasterServiceResponse : sig
-  type t =  |FirstChainMember 
-            | NewTail | PrepareNewTail of (string * int) 
+  type t =  |FirstChainMember | NewTail 
             | InitDone | InitFailed
 
   include Marshalable with type t := t

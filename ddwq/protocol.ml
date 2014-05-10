@@ -20,13 +20,24 @@ end
 (** { Protocol messages} *)
 (*************************)
 
+module ChainComm_ReplicaNodeRequest = struct
+  type t = SequenceNumberRequest of int  (*hostname * listening port *)
 
+  include Marshaller
+end
+
+module ChainComm_ReplicaNodeResponse = struct
+  type t = SequenceNumberReponse of int | HaveAnUpdate
+
+  include Marshaller
+end
 
 module MasterMonitorComm = struct
   type t =  | ImAlive 
             | YouAreNewHead | YouAreNewTail 
             | YouHaveNewPrevNode of ((string * int) * int) | YouHaveNewNextNode of (string * int)
             | OnSeqNumber of int
+            | PrepareNewTail of (string * int)
 
   include Marshaller
 end
@@ -44,7 +55,7 @@ module MasterServiceRequest = struct
 end
 
 module MasterServiceResponse = struct
-  type t = FirstChainMember | NewTail | PrepareNewTail of (string * int) | InitDone | InitFailed
+  type t = FirstChainMember | NewTail | InitDone | InitFailed
 
   include Marshaller
 end

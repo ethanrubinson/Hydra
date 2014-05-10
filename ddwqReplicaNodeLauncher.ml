@@ -12,7 +12,9 @@ type listening_port = int
 type node_id        = ip_address * listening_port
 
 type ('a, 'b) t                 = ('a, 'b) Unix_syscalls.Socket.t
-type ('a, 'b) master_connection = ([< `Active | `Bound | `Passive | `Unconnected ] as 'a, [< Socket.Address.t ] as 'b) t * Async_extra.Import.Reader.t * Async_extra.Import.Writer.t
+type ('a, 'b) master_connection = ([< `Active | `Bound | `Passive | `Unconnected ] as 'a, [< Socket.Address.t ] as 'b) t *
+                                  Async_extra.Import.Reader.t * 
+                                  Async_extra.Import.Writer.t
 
 type ('a, 'b) node      = ('a, 'b) master_connection * node_id
 type ('a, 'b) next_node = ('a, 'b) node option
@@ -49,6 +51,7 @@ let state = ref {
 
 
 (*let should_terminate = Ivar.create()*)
+let should_send_new_tail_ack = Ivar.create()
 
 (***********************************************************)
 (* UTILITY FUNCTIONS                                       *)
@@ -58,7 +61,7 @@ let get_some (thing : 'a option) = match thing with | Some x -> x | _ -> failwit
 
 let node_id_to_string (nodeId : node_id) : string = 
   let (ip,port) = nodeId in
-  "{Node@" ^ ip ^ (string_of_int port) ^ "}"
+  "{Node@" ^ ip ^ ":" ^ (string_of_int port) ^ "}"
 
 
 
@@ -76,7 +79,105 @@ let close_socket_and_do_func m f =
   !state.self  := None;
   ((after (Core.Std.sec 5.0)) >>= fun _ -> f())
 
+
+
+let rec prepare_new_tail_node ip port () = 
+  debug INFO ("Connecting to our new tail node... @" ^ ip ^ ":" ^ string_of_int port);
+  try_with ( fun () -> (Tcp.connect (Tcp.to_host_and_port ip port)) )
+  >>= function
+    | Core.Std.Result.Error e -> begin 
+      debug ERROR "Failed to connect to our tail. Retry in 5 seconds";
+      ((after (Core.Std.sec 5.0)) >>= fun _ -> (prepare_new_tail_node ip port ()))
+    end
+    | Core.Std.Result.Ok m -> begin
+      debug INFO "Connected to our tail node!";
+
+      (* Finish initializing the state with info about the connection *)
+      let (a,r,w) = m in
+      !state.next_node := Some((a,r,w),(ip,port));
+
+      let module ChainReq = ChainComm_ReplicaNodeRequest in
+      let module ChainRes = ChainComm_ReplicaNodeResponse in
+
+
+      (* Get our initialization type from the master. This is either FirstChainMember or NewTail*)
+      debug INFO "Sending initialization packet";
+      ChainRes.send w (ChainRes.HaveAnUpdate);
+      never()
+      end
+
+let rec init_as_new_tail () = 
+  let module ChainReq = ChainComm_ReplicaNodeRequest in
+  let module ChainRes = ChainComm_ReplicaNodeResponse in
+
+  Tcp.Server.create
+    ~on_handler_error:`Raise
+    (Tcp.on_port !state.!chain_port)
+    (fun addr r w  ->
+      (*let chain_connection = (addr,r,w) in*)
+      let addr_string = Socket.Address.to_string addr in
+      debug INFO ("[" ^ addr_string ^ "] Connection established with our prev node. Starting session");
+      
+      ChainRes.receive r
+      >>= function
+        | `Eof -> begin 
+          debug WARN ("[" ^ addr_string ^ "] Socket was closed by our prev node. Terminating session.");
+          return ()
+        end
+        | `Ok msg -> begin 
+            match msg with
+              | ChainRes.HaveAnUpdate -> begin 
+                debug INFO ("Initialization with prev node successful!");
+                (Ivar.fill_if_empty should_send_new_tail_ack "Yes");
+
+                never()
+              end (* Match InitReq *)
+              | _ -> debug INFO ("Got a weird message ????"); never()
+
+        end
+
+    )
+    >>= fun server ->
+    debug INFO ("Opening server for our new prev node to connect to");
+    (**when_should_terminate()*)
+    never()
+    (*>>= fun _ ->
+    (Tcp.Server.close server)
+    >>= fun _ -> 
+    return 0*)
+  
+
  
+let rec begin_master_service_listening_service a r w = 
+
+  let module MSMonitor = MasterMonitorComm in
+  MSMonitor.receive r
+  >>= function
+    | `Eof -> begin
+      debug FATAL "Lost connnection to Master-Service";
+      close_socket_and_do_func a (return)
+    end
+    | `Ok mointor_result -> begin
+      match mointor_result with 
+        | MSMonitor.PrepareNewTail(ip, port) -> begin 
+          debug INFO "Motherfucking jones.... we're getting a tail! How damn exciting!";
+
+
+          don't_wait_for(prepare_new_tail_node ip port ());
+
+
+          begin_master_service_listening_service a r w
+        end
+        | _ -> begin 
+          debug INFO "Got some message that was not preparenewtail";
+          begin_master_service_listening_service a r w
+        end
+    end
+
+
+
+
+
 
 let rec begin_master_connection master_ip master_port () = 
   debug INFO "Attempting to connect to Master-Service...";
@@ -141,8 +242,8 @@ let rec begin_master_connection master_ip master_port () =
 
                     (* Okay we've connected now we can wait for user requests.... not sure how to do that just
                        yet so this comment will take its place for now*)
-                    
-                    never() (* We shall just literally do nothing but keep the socket alive for now*)
+                    begin_master_service_listening_service a r w
+                    (*never()  We shall just literally do nothing but keep the socket alive for now*)
 
                   end
                   | MSRes.InitFailed -> begin
@@ -161,17 +262,24 @@ let rec begin_master_connection master_ip master_port () =
              
 
 
-              MSAck.send w MSAck.NewTailAck;
+              (*Listening service start here *)
+              don't_wait_for(init_as_new_tail ());
+              (Ivar.read should_send_new_tail_ack) 
+              >>= fun _ ->
+              MSAck.send w MSAck.NewTailAck; (*Send the ACK indicating we have initialized ourselves successfully as the tail*)
+              
+              (*The additional InitDone from master was removed. It is unnecesary and just opens the door for concurrency issues*)
 
-
-
-
-
-              never() (* We shall just literally do nothing but keep the socket alive for now*)
+              begin_master_service_listening_service a r w
+              (*never()  We shall just literally do nothing but keep the socket alive for now*)
 
               
 
             end (*NewTail Case*)
+            | MSRes.InitFailed -> begin 
+              debug ERROR "Initialization failed, another tail node is pending. Retrying in 5 seconds";
+              close_socket_and_do_func a (begin_master_connection master_ip master_port)
+            end (*Unexpected reponse (wanted FirstChainMember or NewTail) Case*)
             | _ -> begin 
               debug ERROR "Received unexpected initialization response. Resetting state and retrying in 5 seconds";
               close_socket_and_do_func a (begin_master_connection master_ip master_port)
