@@ -9,15 +9,14 @@ open Async_unix
 
 type ip_address     = string
 type listening_port = int
+type node_id        = ip_address * listening_port
 
-type ('a, 'b) t = ('a, 'b) Unix_syscalls.Socket.t
+type ('a, 'b) t                 = ('a, 'b) Unix_syscalls.Socket.t
 type ('a, 'b) master_connection = ([< `Active | `Bound | `Passive | `Unconnected ] as 'a, [< Socket.Address.t ] as 'b) t * Async_extra.Import.Reader.t * Async_extra.Import.Writer.t
 
-type node_id  = ip_address * listening_port
-type ('a, 'b) node     =  ('a, 'b) master_connection * node_id
-
-type ('a, 'b) next_node    = ('a, 'b) node option
-type ('a, 'b) prev_node    = ('a, 'b) node option 
+type ('a, 'b) node      = ('a, 'b) master_connection * node_id
+type ('a, 'b) next_node = ('a, 'b) node option
+type ('a, 'b) prev_node = ('a, 'b) node option 
 
 type ('a, 'b) node_state = {
   master_ip   : string ref;
