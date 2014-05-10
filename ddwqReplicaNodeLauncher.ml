@@ -16,9 +16,12 @@ type ('a, 'b) master_connection = ([< `Active | `Bound | `Passive | `Unconnected
                                   Async_extra.Import.Reader.t * 
                                   Async_extra.Import.Writer.t
 
-type ('a, 'b) node      = ('a, 'b) master_connection * node_id
-type ('a, 'b) next_node = ('a, 'b) node option
-type ('a, 'b) prev_node = ('a, 'b) node option 
+
+type ('a, 'b) next_node_connection  = ('a, 'b) master_connection * node_id
+type prev_node_connection           = Async_extra.Import.Socket.Address.Inet.t * Async_extra.Import.Reader.t * Async_extra.Import.Writer.t
+
+type ('a, 'b) self_node = ('a, 'b) master_connection * node_id
+
 
 type ('a, 'b) node_state = {
   master_ip   : string ref;
@@ -26,12 +29,12 @@ type ('a, 'b) node_state = {
   chain_port  : int ref;
   user_port   : int ref;
 
-  next_node : ('a, 'b) node option ref;
-  prev_node : ('a, 'b) node option ref;
+  next_node : ('a, 'b) next_node_connection option ref;
+  prev_node : prev_node_connection option ref;
 
   id    : node_id ref;
   mconn : ('a, 'b) master_connection option ref;
-  self  : ('a, 'b) node option ref;
+  self  : ('a, 'b) self_node option ref;
 
 }
 
@@ -56,6 +59,7 @@ let should_send_new_tail_ack = Ivar.create()
 (***********************************************************)
 (* UTILITY FUNCTIONS                                       *)
 (***********************************************************)
+let is_none (thing : 'a option) = match thing with | None -> true | _ -> false
 
 let get_some (thing : 'a option) = match thing with | Some x -> x | _ -> failwith "Tried to get Some of None"
 
@@ -63,7 +67,15 @@ let node_id_to_string (nodeId : node_id) : string =
   let (ip,port) = nodeId in
   "{Node@" ^ ip ^ ":" ^ (string_of_int port) ^ "}"
 
+let next_node_to_string node : string = 
+  let (_,nodeId) = node in
+  node_id_to_string nodeId
 
+let self_node_to_string node : string = next_node_to_string node
+
+let prev_node_to_string node : string = 
+  let (a,_,_) = node in
+  "{Node@" ^ Socket.Address.to_string a ^ "}"
 
 (***********************************************************)
 (* REPLICA NODE FUNCTIONS                                  *)
@@ -71,6 +83,39 @@ let node_id_to_string (nodeId : node_id) : string =
 
 (*let rec when_should_terminate () = 
   (Ivar.read should_terminate) >>| fun _ -> ()*)
+
+
+let print_visible_state () = 
+    let output_string = ref "\n" in
+
+    (if is_none !state.!prev_node then begin
+      output_string := !output_string ^ "PREV=NONE -->\n";
+    end
+    else begin
+      let pn = get_some !state.!prev_node in
+      output_string := !output_string ^ "PREV=" ^ (prev_node_to_string pn) ^ " -->\n";
+    end);
+
+    (if is_none !state.!self then begin
+      output_string := !output_string ^ "SELF=NONE -->\n";
+    end
+    else begin
+      let sn = get_some !state.!self in
+      output_string := !output_string ^ "SELF=" ^ (self_node_to_string sn) ^ " -->\n";
+    end);
+
+    (if is_none !state.!next_node then begin
+      output_string := !output_string ^ "NEXT=NONE -->\n"
+    end
+    else begin
+      let nn = get_some !state.!next_node in
+      output_string := !output_string ^ "NEXT=" ^(next_node_to_string nn) ^ " -->\n";
+    end);
+
+
+     
+
+    debug INFO ("Visible Chain Structure :" ^ !output_string)
 
 
 let close_socket_and_do_func m f = 
@@ -118,10 +163,12 @@ let rec init_as_new_tail () =
       let addr_string = Socket.Address.to_string addr in
       debug INFO ("[" ^ addr_string ^ "] Connection established with our prev node. Starting session");
       
+      !state.prev_node := Some((addr,r,w));
+
       ChainRes.receive r
       >>= function
         | `Eof -> begin 
-          debug WARN ("[" ^ addr_string ^ "] Socket was closed by our prev node. Terminating session.");
+          debug ERROR ("[" ^ addr_string ^ "] Socket was closed by our prev node. Terminating session.");
           return ()
         end
         | `Ok msg -> begin 
@@ -324,6 +371,11 @@ let () =
       !state.user_port   := port_user;
       !state.id          := ((Unix.gethostname()), port_chain);
       debug NONE ("Replica Node ID: " ^ node_id_to_string !state.!id);
+
+      ignore(every ~stop:(never()) (Core.Std.sec 3.0) (
+                  fun () -> print_visible_state()
+                ));
+
 
       begin_master_connection ip_master port_master ()
 
