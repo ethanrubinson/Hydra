@@ -6,7 +6,7 @@ open Async_unix
 (******************************)
 
 module Work_Full = struct
-  type sys_command = string
+  (*type sys_command = string
   type archive_name = string
   type archive_data = string
 
@@ -15,9 +15,18 @@ module Work_Full = struct
 
   let worktype_id = "work.full"
 
-  let run_work input = failwith "run_work for type work.full not yet implemented"
+  let run_work input = failwith "run_work for type work.full not yet implemented"*)
 
+  type input = (string) 
+  type output = (string)
+
+  let worktype_id = "work.full"
+
+  let run_and_package_work input = failwith "run_work for type work.full not yet implemented"
+
+  let unpackage_work input = failwith "run_work for type work.full not yet implemented"
 end
+
 
 (* Load the work-type *)
 let () = Ddwq.load_worktype (module Work_Full)

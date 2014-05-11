@@ -1,5 +1,5 @@
 open Async.Std
-
+open Ddwq
 (************************************)
 (** { Marshaling and unmarshaling } *)
 (************************************)
@@ -19,6 +19,31 @@ end
 (*************************)
 (** { Protocol messages} *)
 (*************************)
+
+module ClientInitResponse  = struct
+  type 'b t = | InitForWorkTypeFailed of string
+              | InitForWorkTypeSucceeded
+
+  include Marshaller
+end
+
+module ClientInitRequest  = struct
+  type 'b t = InitForWorkType of string
+
+  include Marshaller
+end
+
+module ClientRequest = functor (Work : Ddwq.WorkType)  -> struct
+  type 'b t = DDWQWorkRequest of Work.input
+
+  include Marshaller
+end
+
+module ClientResponse = functor (Work : Ddwq.WorkType) -> struct
+  type 'b t = DDWQWorkResult of Work.output
+
+  include Marshaller
+end
 
 module ChainComm_ReplicaNodeRequest = struct
   type 'b t_table = (int, 'b) Hashtbl.t

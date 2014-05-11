@@ -3,7 +3,7 @@
 open Async.Std
 
 type id = string
-
+type net_data = string 
 (******************************************************************************)
 (** {2 Job interface}                                                         *)
 (******************************************************************************)
@@ -15,10 +15,13 @@ module type WorkType = sig
 
   (** a unique identifier for the worktype *)
   val worktype_id   : id
+  
+  (** a unique identifier for the worktype *)
+  val run_and_package_work    : input -> net_data Deferred.t
 
-  (** perform the work *)
-  val run_work    : input -> output Deferred.t
+  val unpackage_work    : net_data -> output
 end
+
 
 (** The following three functions are used by the framework to find the module
     corresponding to a WorkType.  For each module W of type Work, you must call {[

@@ -4,6 +4,8 @@ open Work_full
 open Protocol
 open Async_unix
 open AQueue
+open Ddwq
+
 (***********************************************************)
 (* STATE VARS                                              *)
 (***********************************************************)
@@ -175,30 +177,77 @@ let find_update_for_seqnum seq_num =
   Hashtbl.find !history seq_num
 
 
-let tmp_index = ref 0 
+
 let launch_client_listening_service () = 
 
-  ignore(every ~stop:(never()) (Core.Std.sec 0.1) (
-                  fun () -> 
-                  (*New user data arrived! Simulate this for now...*)
-                  let module ChainReq = ChainComm_ReplicaNodeRequest in
-                  let new_data = "D-" ^ (string_of_int (!tmp_index)) in
-                  (tmp_index:=!tmp_index + 1);
+let module CIReq = ClientInitRequest in
+let module CIRes = ClientInitResponse in
+Tcp.Server.create
+    ~on_handler_error:`Raise
+    (Tcp.on_port !state.!user_port)
+    (fun addr r w  ->
+      (*let user_connection = (addr,r,w) in*)
+      let addr_string = Socket.Address.to_string addr in
+      debug INFO ("[" ^ addr_string ^ "] Connection established with a client. Starting session");
+      debug INFO ("[" ^ addr_string ^ "] Waiting for DoWork request from client.");
+      CIReq.receive r
+      >>= function
+        | `Eof -> begin 
+          debug WARN ("[" ^ addr_string ^ "] Socket was closed by client. Terminating session.");
+          return ()
+        end
+        | `Ok msg -> begin 
+            match msg with 
+              | CIReq.InitForWorkType(t) -> begin
+                if is_none (Ddwq.get_worktype_for_id t) then begin
+                  debug ERROR ("[" ^ addr_string ^ "] Got a worktype request that was not installed.");
+                  CIRes.send w (CIRes.InitForWorkTypeFailed("Not installed"));
+                  return ()
+                end
 
-                  Mutex.lock our_state_mutex;
-                  last_sent_seq_num := !last_sent_seq_num + 1;
-                  Hashtbl.add !history (!last_sent_seq_num) new_data;
-                  (if not !state.!am_tail then begin 
-                    let ((a',r',w'),_) = get_some !state.!next_node in
-                    ChainReq.send w' (ChainReq.TakeThisUpdate (!last_sent_seq_num,new_data));
-                  end
-                  else begin
-                    last_acked_seq_num_received := !last_sent_seq_num;
-                  end);
-                  
-                  Mutex.unlock our_state_mutex
+                else begin 
+                  debug INFO ("[" ^ addr_string ^ "] Got a valid worktype request. Sending response.");
+                  CIRes.send w CIRes.InitForWorkTypeSucceeded;
+
+                  let m = get_some (Ddwq.get_worktype_for_id t) in
+
+                  let module MyWork = (val m) in 
+                  let module CReq = (ClientRequest(MyWork)) in
+                  let module CRes = (ClientResponse(MyWork)) in
+
+                    (*Dont actually do anything just yet*)
+
+                  let module Launcher = DdwqController.Make(MyWork) in
+                  (*DdwqController.init hps;*)
+                  Launcher.run ()
+                  >>=
+                    fun work_result -> 
+                      let module ChainReq = ChainComm_ReplicaNodeRequest in
+                      Mutex.lock our_state_mutex;
+                      last_sent_seq_num := !last_sent_seq_num + 1;
+                      Hashtbl.add !history (!last_sent_seq_num) work_result;
+                      (if not !state.!am_tail then begin 
+                        let ((a',r',w'),_) = get_some !state.!next_node in
+                        ChainReq.send w' (ChainReq.TakeThisUpdate (!last_sent_seq_num,work_result));
+                      end
+                      else begin
+                        last_acked_seq_num_received := !last_sent_seq_num;
+                      end);
+                      Mutex.unlock our_state_mutex;
+                      return ()
+
+                end (*case we have work*)
                 
-                ))
+                
+              end (*case initforworktype*)
+
+
+        end
+
+    )
+    >>= fun server ->
+    debug INFO "Started Client TCP Server";
+    never()
 
 let rec listen_to_the_chain which () = 
   let module ChainReq = ChainComm_ReplicaNodeRequest in
@@ -521,7 +570,7 @@ let rec begin_master_service_listening_service a r w =
           !state.am_head := true; 
           !state.prev_node := None;
 
-          (launch_client_listening_service());
+          don't_wait_for(launch_client_listening_service());
         end
         | _ -> begin 
           debug ERROR "Got an unexpected message ???";
@@ -783,4 +832,34 @@ let () =
                   end
                 in
                 bring_self_up_to_date()*)
+
+
+
+
+
+
+
+
+(*let tmp_index = ref 0 
+                ignore(every ~stop:(never()) (Core.Std.sec 0.1) (
+                  fun () -> 
+                  (*New user data arrived! Simulate this for now...*)
+                  let module ChainReq = ChainComm_ReplicaNodeRequest in
+                  let new_data = "D-" ^ (string_of_int (!tmp_index)) in
+                  (tmp_index:=!tmp_index + 1);
+
+                  Mutex.lock our_state_mutex;
+                  last_sent_seq_num := !last_sent_seq_num + 1;
+                  Hashtbl.add !history (!last_sent_seq_num) new_data;
+                  (if not !state.!am_tail then begin 
+                    let ((a',r',w'),_) = get_some !state.!next_node in
+                    ChainReq.send w' (ChainReq.TakeThisUpdate (!last_sent_seq_num,new_data));
+                  end
+                  else begin
+                    last_acked_seq_num_received := !last_sent_seq_num;
+                  end);
+                  
+                  Mutex.unlock our_state_mutex
+                
+                ))*)
 

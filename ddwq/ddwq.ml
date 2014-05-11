@@ -2,6 +2,8 @@ open Async.Std
 
 type id = string
 
+type net_data = string
+
 module type WorkType = sig
   type input
   type output
@@ -10,8 +12,11 @@ module type WorkType = sig
   val worktype_id   : id
 
   (** perform the work *)
-  val run_work    : input -> output Deferred.t
+  val run_and_package_work    : input -> net_data Deferred.t
+
+  val unpackage_work    : net_data -> output
 end
+
 
 let worktype_table = Hashtbl.create 8
 

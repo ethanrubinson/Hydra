@@ -1,5 +1,5 @@
 open Async.Std
-
+open Ddwq
 (** The messages sent between the slave nodes and master node *)
 
 (****************************************)
@@ -23,6 +23,34 @@ end
 (** { DDWQ Protocol } **)
 (***********************)
 
+
+module ClientInitResponse : sig
+  type 'b t = | InitForWorkTypeFailed of string
+              | InitForWorkTypeSucceeded
+                
+  include Marshalable with type 'b t := 'b t
+end
+
+module ClientInitRequest : sig
+  type 'b t = InitForWorkType of string
+                
+  include Marshalable with type 'b t := 'b t
+end
+
+module ClientRequest : functor (Work : Ddwq.WorkType)  ->  sig
+  type 'b t = DDWQWorkRequest of Work.input
+
+  
+  include Marshalable with type 'b t := 'b t
+end
+
+module ClientResponse : functor (Work : Ddwq.WorkType)  -> sig
+  type 'b t = DDWQWorkResult of Work.output
+
+  
+  include Marshalable with type 'b t := 'b t
+end
+
 module ChainComm_ReplicaNodeRequest : sig 
   type 'b t_table = (int, 'b) Hashtbl.t
   type 'b t =  | GetReadyToSync
@@ -30,6 +58,7 @@ module ChainComm_ReplicaNodeRequest : sig
             | UpdateYourHistory of (int * ('b t_table)) (*Seq num , History for seq num*)
             | TakeThisUpdate of (int * 'b)
             | TakeThisACK of (int)
+
 
   include Marshalable with type 'b t := 'b t
 end

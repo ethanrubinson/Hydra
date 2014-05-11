@@ -23,7 +23,7 @@ module Make = functor(Work : Ddwq.WorkType) -> struct
 
 
   let run () =
-    (Sys.command "clear")
+    (*(Sys.command "clear")
     >>= fun _ ->
 
     (* Initialize connections to Slave nodes *)
@@ -76,5 +76,6 @@ module Make = functor(Work : Ddwq.WorkType) -> struct
     end
     in
     Deferred.List.map ~how:`Parallel slave_list ~f:connect_and_initialize_slaves
-    >>= fun _ -> (debug INFO ("Finished initialization. # Active Slaves = " ^ (string_of_int (!num_alive_slaves)))); (after (Core.Std.sec 5.0)) >>= fun _ -> return () 
+    >>= fun _ -> (debug INFO ("Finished initialization. # Active Slaves = " ^ (string_of_int (!num_alive_slaves)))); (after (Core.Std.sec 5.0)) >>= fun _ -> return () *)
+    return "WorkDone"
 end

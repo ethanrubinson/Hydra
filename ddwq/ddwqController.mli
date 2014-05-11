@@ -1,7 +1,7 @@
 open Async.Std 
 
 module Make : functor (Work : Ddwq.WorkType) -> sig
-  val run : unit -> unit Deferred.t
+  val run : unit -> Ddwq.net_data Deferred.t
 end
 
 (** set up the map reduce controller to connect the the provided worker adresses *)
