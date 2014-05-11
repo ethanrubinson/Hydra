@@ -649,11 +649,13 @@ let rec begin_master_connection master_ip master_port () =
                     
                     (* Ensure these are reset for sanity measures *)
                     !state.am_head := true;
+                    !state.am_tail := true;
                     !state.next_node := None;
                     !state.prev_node := None;
 
-                    (* Okay we've connected now we can wait for user requests.... not sure how to do that just
-                       yet so this comment will take its place for now*)
+                    (* Okay we've connected now we can wait for user requests*)
+                    don't_wait_for(launch_client_listening_service());
+
                     begin_master_service_listening_service a r w
                     (*never()  We shall just literally do nothing but keep the socket alive for now*)
 
