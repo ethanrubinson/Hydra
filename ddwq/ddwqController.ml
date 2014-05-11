@@ -2,25 +2,8 @@ open Async.Std
 open Protocol
 open AQueue
 open Warmup
-open Printexc
-
-let alive_master_queue = AQueue.create ()
-let num_alive_masters = ref 0
-let current_leader = ref ""
-
-let ips = ref []
-
-(* Enable/Disable debug output for the Controller*)
-let debug_mode_active = true
-type debug_type = INFO | WARN | ERROR | FATAL | NONE
-let debug t string_to_print = (let t_String = "\027[0m" ^ (match t with |INFO -> "\027[32m[INFO] >> " |WARN -> "\027[33m[WARN] >> "|ERROR -> "\027[31m[ERROR] >> "| FATAL -> "\027[31m\027[5m[FATAL] >> "|NONE -> "") in if debug_mode_active then (print_endline (t_String ^ string_to_print ^ "\027[0m" )) else ())
-
-
-let init addrs = (ips := addrs)
 
 module Make = functor(Work : Ddwq.WorkType) -> struct
-  let print_slave ip port = (ip ^ ":" ^ string_of_int port)
-
 
   let run () =
     (*(Sys.command "clear")
