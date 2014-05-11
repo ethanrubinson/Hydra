@@ -15,11 +15,11 @@ module type WorkType = sig
 
   (** a unique identifier for the worktype *)
   val worktype_id   : id
-  
-  (** a unique identifier for the worktype *)
-  val run_and_package_work    : input -> net_data Deferred.t
 
-  val unpackage_work    : net_data -> output
+  val load_input_for_string   : string -> input
+  
+  val run_and_package_work    : input -> net_data
+  val net_data_to_work_output : net_data -> output
 end
 
 

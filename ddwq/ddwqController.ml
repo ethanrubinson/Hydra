@@ -5,7 +5,7 @@ open Warmup
 
 module Make = functor(Work : Ddwq.WorkType) -> struct
 
-  let run () =
+  let run work_input =
     (*(Sys.command "clear")
     >>= fun _ ->
 
@@ -60,5 +60,5 @@ module Make = functor(Work : Ddwq.WorkType) -> struct
     in
     Deferred.List.map ~how:`Parallel slave_list ~f:connect_and_initialize_slaves
     >>= fun _ -> (debug INFO ("Finished initialization. # Active Slaves = " ^ (string_of_int (!num_alive_slaves)))); (after (Core.Std.sec 5.0)) >>= fun _ -> return () *)
-    return "WorkDone"
+    return (Work.run_and_package_work work_input)
 end

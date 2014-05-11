@@ -214,27 +214,34 @@ Tcp.Server.create
                   let module MyWork = (val m) in 
                   let module CReq = (ClientRequest(MyWork)) in
                   let module CRes = (ClientResponse(MyWork)) in
-
-                    (*Dont actually do anything just yet*)
-
                   let module Launcher = DdwqController.Make(MyWork) in
-                  (*DdwqController.init hps;*)
-                  Launcher.run ()
-                  >>=
-                    fun work_result -> 
-                      let module ChainReq = ChainComm_ReplicaNodeRequest in
-                      Mutex.lock our_state_mutex;
-                      last_sent_seq_num := !last_sent_seq_num + 1;
-                      Hashtbl.add !history (!last_sent_seq_num) work_result;
-                      (if not !state.!am_tail then begin 
-                        let ((a',r',w'),_) = get_some !state.!next_node in
-                        ChainReq.send w' (ChainReq.TakeThisUpdate (!last_sent_seq_num,work_result));
-                      end
-                      else begin
-                        last_acked_seq_num_received := !last_sent_seq_num;
-                      end);
-                      Mutex.unlock our_state_mutex;
+                  CReq.receive r
+                  >>= function
+                    | `Eof -> begin 
+                      debug ERROR ("[" ^ addr_string ^ "] Lost connection to client. Terminating session");
                       return ()
+                    end 
+                    | `Ok msg -> begin 
+                      match msg with 
+                        | CReq.DDWQWorkRequest(work_input) -> begin 
+                          Launcher.run work_input
+                          >>=
+                            fun work_result -> 
+                              let module ChainReq = ChainComm_ReplicaNodeRequest in
+                              Mutex.lock our_state_mutex;
+                              last_sent_seq_num := !last_sent_seq_num + 1;
+                              Hashtbl.add !history (!last_sent_seq_num) work_result;
+                              (if not !state.!am_tail then begin 
+                                let ((a',r',w'),_) = get_some !state.!next_node in
+                                ChainReq.send w' (ChainReq.TakeThisUpdate (!last_sent_seq_num,work_result));
+                              end
+                              else begin
+                                last_acked_seq_num_received := !last_sent_seq_num;
+                              end);
+                              Mutex.unlock our_state_mutex;
+                              return ()
+                        end
+                    end
 
                 end (*case we have work*)
                 
@@ -735,7 +742,7 @@ let () =
       !state.id          := ((Unix.gethostname()), port_chain);
       debug NONE ("Replica Node ID: " ^ node_id_to_string !state.!id);
 
-      ignore(every ~stop:(never()) (Core.Std.sec 0.25) (
+      ignore(every ~stop:(never()) (Core.Std.sec 1.0) (
                   fun () -> don't_wait_for(print_visible_state())
                 ));
 

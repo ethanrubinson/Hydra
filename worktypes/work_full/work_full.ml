@@ -22,9 +22,10 @@ module Work_Full = struct
 
   let worktype_id = "work.full"
 
-  let run_and_package_work input = failwith "run_work for type work.full not yet implemented"
-
-  let unpackage_work input = failwith "run_work for type work.full not yet implemented"
+  let load_input_for_string s = (s ^ "-loaded")
+  
+  let run_and_package_work input = (input ^ "-result")
+  let net_data_to_work_output net_data = net_data
 end
 
 

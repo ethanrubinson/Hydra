@@ -36,8 +36,8 @@ let () =
                   (*!state.next_node := Some((a,r,w),(ip,port));*) (*Change... see below*)
                   let module CIReq = ClientInitRequest in
                   let module CIRes = ClientInitResponse in
-                  let module CReq = ClientRequest in
-                  let module CRes = ClientResponse in
+                  let module CReq = ClientRequest(MyWork) in
+                  let module CRes = ClientResponse(MyWork) in
 
                   debug INFO "Connected to the chain.";
 
@@ -57,7 +57,8 @@ let () =
                     | `Ok msg -> begin 
                       match msg with
                         | CIRes.InitForWorkTypeSucceeded -> begin 
-                          debug INFO "SUCCESS!";
+                          debug INFO "Successfully initialized work request. Sending it now!";
+                          CReq.send w (CReq.DDWQWorkRequest(MyWork.load_input_for_string "Test!"));
                           return()
                         end 
                         | CIRes.InitForWorkTypeFailed f -> begin 

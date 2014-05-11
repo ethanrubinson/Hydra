@@ -1,4 +1,4 @@
-let debug_mode_active = false
+let debug_mode_active = true
 
 type debug_type = INFO | WARN | ERROR | FATAL | NONE
 
