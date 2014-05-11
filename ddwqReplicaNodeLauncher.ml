@@ -62,7 +62,7 @@ let state = ref {
 }
 
 
-let history = ref []
+let history = ref (Hashtbl.create 100)
 let last_acked_seq_num_received = ref (-1)
 let last_sent_seq_num = ref (-1)
 
@@ -109,6 +109,9 @@ let prev_node_to_string node : string =
 
 
 let print_visible_state () = 
+
+    (Sys.command "clear")
+      >>= fun _ ->
     let output_string = ref "\n" in
 
     (if is_none !state.!prev_node then begin
@@ -124,7 +127,30 @@ let print_visible_state () =
     end
     else begin
       let sn = get_some !state.!self in
-      output_string := !output_string ^ "SELF=" ^ (self_node_to_string sn) ^ " -->\n";
+      let history_output_string = ref "" in
+      output_string := !output_string ^ "SELF=" ^ (self_node_to_string sn) ^ 
+                        "\nCONFIRMED=" ^ (string_of_int !last_acked_seq_num_received) ^ 
+                        "\nSENT=" ^ (string_of_int !last_sent_seq_num) ^
+                        "\nDATA=" ^ 
+                        
+                        ((if !last_sent_seq_num = -1 then begin
+                          history_output_string := "No chain"
+                        end
+                        else begin
+                          let rec print_history key = 
+                            (*(debug INFO ("Looking up ID" ^ node_id_to_string key));*)
+                            let found_entry = Hashtbl.find !history key in
+                            (history_output_string := !history_output_string ^ "-> " ^ found_entry);
+                            if key < !last_sent_seq_num then begin
+                              print_history (key + 1)
+                            end
+                            else begin
+                            ()
+                            end
+                          in
+                          print_history 0
+                        end); !history_output_string) ^
+                         " -->\n";
     end);
 
     (if is_none !state.!next_node then begin
@@ -135,7 +161,8 @@ let print_visible_state () =
       output_string := !output_string ^ "NEXT=" ^(next_node_to_string nn) ^ " -->\n";
     end);
 
-    debug INFO ("Visible Chain Structure :" ^ !output_string)
+    debug NONE ("Visible Chain Structure :" ^ !output_string);
+    return ()
 
 
 let close_socket_and_do_func m f = 
@@ -144,120 +171,149 @@ let close_socket_and_do_func m f =
   !state.self  := None;
   ((after (Core.Std.sec (Random.float 5.0))) >>= fun _ -> f())
 
+let find_update_for_seqnum seq_num = 
+  Hashtbl.find !history seq_num
 
-let launch_client_listening_service () = never()
+
+let tmp_index = ref 0 
+let launch_client_listening_service () = 
+
+  ignore(every ~stop:(never()) (Core.Std.sec 0.1) (
+                  fun () -> 
+                  (*New user data arrived! Simulate this for now...*)
+                  let module ChainReq = ChainComm_ReplicaNodeRequest in
+                  let new_data = "D-" ^ (string_of_int (!tmp_index)) in
+                  (tmp_index:=!tmp_index + 1);
+
+                  Mutex.lock our_state_mutex;
+                  last_sent_seq_num := !last_sent_seq_num + 1;
+                  Hashtbl.add !history (!last_sent_seq_num) new_data;
+                  (if not !state.!am_tail then begin 
+                    let ((a',r',w'),_) = get_some !state.!next_node in
+                    ChainReq.send w' (ChainReq.TakeThisUpdate (!last_sent_seq_num,new_data));
+                  end
+                  else begin
+                    last_acked_seq_num_received := !last_sent_seq_num;
+                  end);
+                  
+                  Mutex.unlock our_state_mutex
+                
+                ))
 
 let rec listen_to_the_chain which () = 
   let module ChainReq = ChainComm_ReplicaNodeRequest in
   let module ChainRes = ChainComm_ReplicaNodeResponse in
-  (*We are the head. We might be the tail*)
-
-
-                            if which = NEXT then begin 
-                              Mutex.lock our_state_mutex;
-                              let ((a',r',w'),_) = get_some !state.!next_node in
-                              Mutex.unlock our_state_mutex;
-
-                              debug INFO ("Waiting on message from next node.");
-                              ChainReq.receive r'
-                              >>= function
-                                | `Eof -> begin 
-                                  debug ERROR ("Error receving message from next node. Retrying.");
-                                  return()
-                                end
-                                | `Ok msg -> begin 
-                                    match msg with
-                                    | ChainReq.TakeThisACK (seq_num_ack) -> begin 
-                                      Mutex.lock our_state_mutex;
-                                      debug INFO ("Got an ACK for SEQ#= " ^ string_of_int seq_num_ack);
-                                      last_acked_seq_num_received := seq_num_ack;
-
-                                      (if !state.!am_head then begin 
-                                        debug INFO ("We are the head. Just recording the ACK. Nothing else");
-                                      end 
-                                      
-                                      else begin    
-                                        debug INFO ("We are a middle node. Sending the ACK to our prev node");
-                                        
-                                        let (a,r,w) = get_some !state.!prev_node in
-                                        ChainReq.send w (ChainReq.TakeThisACK(seq_num_ack));
-                                      end); 
-
-                                      Mutex.unlock our_state_mutex;
-                                      return()
-                                    end 
-                                    | _ -> begin 
-                                      debug ERROR "Got a message that was not TakeThisACK";
-                                      return()
-                                    end
-                                end
-                                >>= fun _ ->
-                                if (Ivar.is_full (!should_terminate_current_next_conn)) then return() else listen_to_the_chain NEXT ()
-
-                            end (*of case monitor NEXT*)
-else begin 
-    (*We are either the tail or a mid node either way this is the same*)
+  
+  (*Monitor the next node in the chain*)
+  if which = NEXT then begin 
     Mutex.lock our_state_mutex;
-    let (addr,r,w) = get_some !state.!prev_node in
+    let ((a',r',w'),_) = get_some !state.!next_node in
     Mutex.unlock our_state_mutex;
 
-    debug INFO ("Listening for message from prev node.");
-    ChainReq.receive r
+    debug INFO ("Waiting on message from next node.");
+    ChainReq.receive r'
     >>= function
       | `Eof -> begin 
-        debug ERROR ("Error receving message from prev node. Retrying.");
+        debug ERROR ("Error receving message from next node. Retrying.");
         return()
       end
       | `Ok msg -> begin 
           match msg with
-          | ChainReq.UpdateYourHistory(seq_num, hist) -> begin 
-            (*We're the tail. Now we have our history. Let the Master-Service know we are ready to rumble*)
+          | ChainReq.TakeThisACK (seq_num_ack) -> begin 
             Mutex.lock our_state_mutex;
-            debug INFO ("Updating our history to SEQ#= " ^ string_of_int seq_num);
-            last_acked_seq_num_received := seq_num;
-            last_sent_seq_num := seq_num;
-            history := hist;
-            Mutex.unlock our_state_mutex;
-            debug INFO "Sync completed. Alerting master we are ready to go";
-            Ivar.fill_if_empty should_send_new_tail_ack "Yes";
-            return()
-          end
-          | ChainReq.TakeThisUpdate (seq_num_to_send, update) -> begin 
-            Mutex.lock our_state_mutex;
-            debug INFO ("Got an update with SEQ#= " ^ string_of_int seq_num_to_send ^ " and UPDATE=" ^ update);
-            history := update :: !history;
+            debug INFO ("Got an ACK for SEQ#= " ^ string_of_int seq_num_ack);
 
-            (*we are not the head but we are the tail*)
-            (if !state.!am_tail then begin 
-              debug INFO ("We are the tail. Updating LastACKRecved and LastSentACK and sending an ACK response");
-              last_acked_seq_num_received := seq_num_to_send;
-              last_sent_seq_num := seq_num_to_send;
-              ChainReq.send w (ChainReq.TakeThisACK(seq_num_to_send));
+            (*Doesn't matter if this is out of sequence. If we get a confirmation for i, everything < i has also been confirmed*)
+            last_acked_seq_num_received := seq_num_ack;
+
+            (if !state.!am_head then begin 
+              debug INFO ("We are the head. Just recording the ACK. Nothing else");
             end 
-            (*We are neither the head or tail*)
+            
             else begin    
-              debug INFO ("We are not the tail. Updating LastSentACK (and send the message onwards)");
-              last_sent_seq_num := seq_num_to_send;
-              let ((a',r',w'),_) = get_some !state.!next_node in
-              ChainReq.send w' (ChainReq.TakeThisUpdate(seq_num_to_send,update));
+              debug INFO ("We are a middle node. Sending the ACK to our prev node");
+              
+              let (a,r,w) = get_some !state.!prev_node in
+              ChainReq.send w (ChainReq.TakeThisACK(seq_num_ack));
             end); 
 
             Mutex.unlock our_state_mutex;
             return()
           end 
-          | ChainReq.SyncDone -> begin 
-            debug INFO "Sync completed. Alerting master we are ready to go";
-            Ivar.fill_if_empty should_send_new_tail_ack "Yes";
+          | _ -> begin 
+            debug ERROR "Got a message that was not TakeThisACK";
             return()
           end
-          | _ -> begin 
-            debug ERROR "Got a message we should not have";
-            return()
-          end 
       end
       >>= fun _ ->
-      if (Ivar.is_full !should_terminate_current_prev_conn) then return() else listen_to_the_chain PREV ()
-end (*Case  monitor PREV*)
+      if (Ivar.is_full (!should_terminate_current_next_conn)) then return() else listen_to_the_chain NEXT ()
+
+  end (*of case monitor NEXT*)
+
+  (*Monitor the previous node in the chain*)
+  else begin 
+      (*We are either the tail or a mid node either way this is the same*)
+      Mutex.lock our_state_mutex;
+      let (addr,r,w) = get_some !state.!prev_node in
+      Mutex.unlock our_state_mutex;
+
+      debug INFO ("Listening for message from prev node.");
+      ChainReq.receive r
+      >>= function
+        | `Eof -> begin 
+          debug ERROR ("Error receving message from prev node. Retrying.");
+          return()
+        end
+        | `Ok msg -> begin 
+            match msg with
+            | ChainReq.UpdateYourHistory(seq_num, hist) -> begin 
+              (*We're the tail. Now we have our history. Let the Master-Service know we are ready to rumble*)
+              Mutex.lock our_state_mutex;
+              debug INFO ("Updating our history to SEQ#= " ^ string_of_int seq_num);
+              last_acked_seq_num_received := seq_num;
+              last_sent_seq_num := seq_num;
+              history := hist;
+              Mutex.unlock our_state_mutex;
+              debug INFO "Sync completed. Alerting master we are ready to go";
+              Ivar.fill_if_empty should_send_new_tail_ack "Yes";
+              return()
+            end
+            | ChainReq.TakeThisUpdate (seq_num_to_send, update) -> begin 
+              Mutex.lock our_state_mutex;
+              debug INFO ("Got an update with SEQ#= " ^ string_of_int seq_num_to_send ^ " and UPDATE=" ^ update);
+              Hashtbl.add !history (seq_num_to_send) update;
+
+              (*we are not the head but we are the tail*)
+              (if !state.!am_tail then begin 
+                debug INFO ("We are the tail. Updating LastACKRecved and LastSentACK and sending an ACK response");
+                last_acked_seq_num_received := seq_num_to_send;
+                last_sent_seq_num := seq_num_to_send;
+                ChainReq.send w (ChainReq.TakeThisACK(seq_num_to_send));
+              end 
+              (*We are neither the head or tail*)
+              else begin    
+                debug INFO ("We are not the tail. Updating LastSentACK (and send the message onwards)");
+                last_sent_seq_num := seq_num_to_send;
+                let ((a',r',w'),_) = get_some !state.!next_node in
+                ChainReq.send w' (ChainReq.TakeThisUpdate(seq_num_to_send,update));
+              end); 
+
+              Mutex.unlock our_state_mutex;
+              return()
+            end 
+            | ChainReq.SyncDone -> begin 
+              debug INFO "Sync completed. If we are the tail, alert the master. If not, keep chugging";
+              Ivar.fill_if_empty should_send_new_tail_ack "Yes";
+              return()
+            end
+            | _ -> begin 
+              debug ERROR "Got a message we should not have";
+              return()
+            end 
+        end
+        >>= fun _ ->
+        if (Ivar.is_full !should_terminate_current_prev_conn) then return() else listen_to_the_chain PREV ()
+  end (*Case  monitor PREV*)
 
 
 let rec prepare_new_tail_node ip port () = 
@@ -323,6 +379,21 @@ let rec prepare_new_tail_node ip port () =
               end
               else begin 
                 debug INFO ("State of next >= ours. Sending SyncDone");
+
+                (*We need to ensure the seq number we are sending our new next node is the next one they are expecting
+                  if it is not (we have received more updates than one more than our next node), loop to send them all *)
+
+                let rec send_missing_updates next_last_sent =
+                  if (!last_sent_seq_num > next_last_sent) then begin
+                     ChainReq.send w (ChainReq.TakeThisUpdate (next_node_last_sent + 1, (find_update_for_seqnum (next_last_sent + 1))));
+                     send_missing_updates (next_last_sent+1)
+                  end
+                  else begin
+                    ()
+                  end                
+                in
+                send_missing_updates next_node_last_sent;
+
                 ChainReq.send w (ChainReq.SyncDone);
                 
 
@@ -446,8 +517,11 @@ let rec begin_master_service_listening_service a r w =
         | MSMonitor.YouAreNewHead -> begin 
           debug INFO "We are the new head!";
           (*TODO -- terminate the current head connection*)
+
           !state.am_head := true; 
           !state.prev_node := None;
+
+          (launch_client_listening_service());
         end
         | _ -> begin 
           debug ERROR "Got an unexpected message ???";
@@ -612,8 +686,8 @@ let () =
       !state.id          := ((Unix.gethostname()), port_chain);
       debug NONE ("Replica Node ID: " ^ node_id_to_string !state.!id);
 
-      ignore(every ~stop:(never()) (Core.Std.sec 3.0) (
-                  fun () -> print_visible_state()
+      ignore(every ~stop:(never()) (Core.Std.sec 0.25) (
+                  fun () -> don't_wait_for(print_visible_state())
                 ));
 
 

@@ -5,9 +5,9 @@ open Async.Std
 (************************************)
 
 module type Marshalable = sig
-  type t
-  val receive : Reader.t -> t Reader.Read_result.t Deferred.t
-  val send    : Writer.t -> t -> unit
+  type 'b t
+  val receive : Reader.t -> 'b t Reader.Read_result.t Deferred.t
+  val send    : Writer.t -> 'b t -> unit
 end
 
 (** Utility class for implementing the Marshalable interface *)
@@ -21,10 +21,11 @@ end
 (*************************)
 
 module ChainComm_ReplicaNodeRequest = struct
-  type t =  | GetReadyToSync
+  type 'b t_table = (int, 'b) Hashtbl.t
+  type 'b t =  | GetReadyToSync
             | SyncDone
-            | UpdateYourHistory of (int * string list) (*Seq num , History for seq num*)
-            | TakeThisUpdate of (int * string)
+            | UpdateYourHistory of (int * ('b t_table)) (*Seq num , History for seq num*)
+            | TakeThisUpdate of (int * 'b)
             | TakeThisACK of (int)
 
 
@@ -32,13 +33,13 @@ module ChainComm_ReplicaNodeRequest = struct
 end
 
 module ChainComm_ReplicaNodeResponse = struct
-  type t = DoSyncForState of ((*Last acked seq num/current data state*)int *(*last sent seq number to T+*)int)
+  type 'b t = DoSyncForState of ((*Last acked seq num/current data state*)int *(*last sent seq number to T+*)int)
 
   include Marshaller
 end
 
 module MasterMonitorComm = struct
-  type t =  | ImAlive 
+  type 'b t =  | ImAlive 
             | YouAreNewHead | YouAreNewTail 
             | YouHaveNewPrevNode of ((string * int) * int) | YouHaveNewNextNode of (string * int)
             | OnSeqNumber of int
@@ -48,32 +49,32 @@ module MasterMonitorComm = struct
 end
 
 module MasterServiceAck = struct
-  type t = FirstChainMemberAck | NewTailAck
+  type 'b t = FirstChainMemberAck | NewTailAck
 
   include Marshaller
 end
 
 module MasterServiceRequest = struct
-  type t = InitRequest of (string * int)  (*hostname * listening port *)
+  type 'b t = InitRequest of (string * int)  (*hostname * listening port *)
 
   include Marshaller
 end
 
 module MasterServiceResponse = struct
-  type t = FirstChainMember | NewTail | InitDone | InitFailed
+  type 'b t = FirstChainMember | NewTail | InitDone | InitFailed
 
   include Marshaller
 end
 
 
 module SlaveRequest (Work : Ddwq.WorkType) = struct
-  type t = DoWorkRequest of Work.input
+  type 'b t = DoWorkRequest of Work.input
 
   include Marshaller
 end
 
 module SlaveResponse (Work : Ddwq.WorkType) = struct
-  type t =
+  type 'b t =
     | DoWorkFailed of string
     | DoWorkResult of Work.output
 
