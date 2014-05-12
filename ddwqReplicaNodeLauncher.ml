@@ -1,6 +1,8 @@
 open Async.Std
 open Debug
 open Work_full
+open Work_addi
+open Work_exec
 open Protocol
 open Async_unix
 open AQueue
