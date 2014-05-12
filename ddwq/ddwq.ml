@@ -12,7 +12,7 @@ module type WorkType = sig
   val worktype_id   : id
 
   val load_input_for_string   : string -> input
-  
+  val work_output_to_string   : output -> string
   val run_and_package_work    : input -> net_data
   val net_data_to_work_output : net_data -> output
 end

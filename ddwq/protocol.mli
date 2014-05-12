@@ -32,7 +32,9 @@ module ClientInitResponse : sig
 end
 
 module ClientInitRequest : sig
-  type t = InitForWorkType of string
+  type user_id = string
+  type work_id = int
+  type t = InitForWorkType of  (user_id * work_id * string)
                 
   include Marshalable with type t := t
 end
@@ -45,7 +47,7 @@ module ClientRequest : functor (Work : Ddwq.WorkType)  ->  sig
 end
 
 module ClientResponse : functor (Work : Ddwq.WorkType)  -> sig
-  type t = DDWQWorkResult of Work.output
+  type t = DDWQWorkResult of Work.output option
 
   
   include Marshalable with type t := t

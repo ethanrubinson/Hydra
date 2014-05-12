@@ -36,6 +36,7 @@ type ('a, 'b) node_state = {
   master_port : int ref;
   chain_port  : int ref;
   user_port   : int ref;
+  resp_port   : int ref;
 
   next_node : ('a, 'b) next_node_connection option ref;
   prev_node : prev_node_connection option ref;
@@ -54,6 +55,7 @@ let state = ref {
   master_port = ref (-1);
   chain_port  = ref (-1);
   user_port   = ref (-1);
+  resp_port   = ref (-1);
 
   next_node = ref None;
   prev_node = ref None;
@@ -77,6 +79,9 @@ let next_conn_terminated = ref (Ivar.create())
 
 let should_terminate_current_prev_conn = ref (Ivar.create())
 let prev_conn_terminated = ref (Ivar.create())
+
+
+let should_terminate_client_responding_service = ref (Ivar.create())
 
 
 let our_state_mutex = Mutex.create()
@@ -177,6 +182,96 @@ let find_update_for_seqnum seq_num =
   Hashtbl.find !history seq_num
 
 
+let rec search_history_for_work_result prefix =              
+  if !last_sent_seq_num = -1 then begin
+      None
+  end
+  else begin
+    let rec search_history key = 
+      let found_entry = Hashtbl.find !history key in
+      if prefix = String.sub found_entry 0 (String.length prefix) then begin
+        Some(String.sub found_entry (String.length prefix) ((String.length found_entry) - (String.length prefix)))
+      end
+      
+      else begin 
+        if key < !last_sent_seq_num then begin
+          search_history (key + 1)
+        end
+        else begin
+          None
+        end
+      end
+    in
+    search_history 0
+  end
+
+
+
+let launch_client_responding_service () = 
+
+let module CIReq = ClientInitRequest in
+let module CIRes = ClientInitResponse in
+Tcp.Server.create
+    ~on_handler_error:`Raise
+    (Tcp.on_port !state.!resp_port)
+    (fun addr r w  ->
+      (*let user_connection = (addr,r,w) in*)
+      let addr_string = Socket.Address.to_string addr in
+      debug INFO ("[" ^ addr_string ^ "] Connection established with a client. Starting session");
+      debug INFO ("[" ^ addr_string ^ "] Waiting for request from client.");
+      CIReq.receive r
+      >>= function
+        | `Eof -> begin 
+          debug WARN ("[" ^ addr_string ^ "] Socket was closed by client. Terminating session.");
+          return ()
+        end
+        | `Ok msg -> begin 
+            match msg with 
+              | CIReq.InitForWorkType(user_id, work_id, t) -> begin
+                let user_info = user_id ^ "|" ^ string_of_int work_id ^ "|" in
+                if is_none (Ddwq.get_worktype_for_id t) then begin
+                  debug ERROR ("[" ^ addr_string ^ "] Got a worktype request that was not installed.");
+                  CIRes.send w (CIRes.InitForWorkTypeFailed("Not installed"));
+                  return ()
+                end
+
+                else begin 
+                  debug INFO ("[" ^ addr_string ^ "] Got a valid worktype request. Sending response.");
+                  CIRes.send w CIRes.InitForWorkTypeSucceeded;
+                  
+                  let m = get_some (Ddwq.get_worktype_for_id t) in
+                  let module MyWork = (val m) in 
+                  let module CReq = (ClientRequest(MyWork)) in
+                  let module CRes = (ClientResponse(MyWork)) in
+
+                  let search_res = search_history_for_work_result user_info in
+                  
+                  if is_none search_res then begin
+                    (*We did not find the work in our history.*)
+                    debug WARN ("[" ^ addr_string ^ "] Requesting work that was not found in our history.");
+                    CRes.send w (CRes.DDWQWorkResult(None));
+                    return()
+                  end
+                  
+                  else begin 
+                  (*We found the work in our history! Returning its result*)
+                    CRes.send w (CRes.DDWQWorkResult(Some (MyWork.net_data_to_work_output (get_some search_res))));
+                    return()
+                  end
+                end
+              end (*case initforworktype*)
+
+
+        end
+
+    )
+    >>= fun server ->
+    debug INFO "Started Client TCP Response Server";
+    (Ivar.read !should_terminate_client_responding_service)
+    >>= fun _ ->
+    (Tcp.Server.close server)
+    >>= fun _ -> 
+    return ()
 
 let launch_client_listening_service () = 
 
@@ -198,7 +293,8 @@ Tcp.Server.create
         end
         | `Ok msg -> begin 
             match msg with 
-              | CIReq.InitForWorkType(t) -> begin
+              | CIReq.InitForWorkType(user_id,work_id,t) -> begin
+                let user_info = user_id ^ "|" ^ string_of_int work_id ^ "|" in
                 if is_none (Ddwq.get_worktype_for_id t) then begin
                   debug ERROR ("[" ^ addr_string ^ "] Got a worktype request that was not installed.");
                   CIRes.send w (CIRes.InitForWorkTypeFailed("Not installed"));
@@ -227,6 +323,7 @@ Tcp.Server.create
                           Launcher.run work_input
                           >>=
                             fun work_result -> 
+                              let work_result = user_info ^ work_result in
                               let module ChainReq = ChainComm_ReplicaNodeRequest in
                               Mutex.lock our_state_mutex;
                               last_sent_seq_num := !last_sent_seq_num + 1;
@@ -253,7 +350,7 @@ Tcp.Server.create
 
     )
     >>= fun server ->
-    debug INFO "Started Client TCP Server";
+    debug INFO "Started Client TCP Listening Server";
     never()
 
 let rec listen_to_the_chain which () = 
@@ -551,6 +648,10 @@ let rec begin_master_service_listening_service a r w =
       (match mointor_result with 
         | MSMonitor.PrepareNewTail(ip, port) -> begin 
           debug INFO "Motherfucking jones.... we're getting a tail! How damn exciting!";
+
+
+
+          Ivar.fill_if_empty (!should_terminate_client_responding_service) "YES";
           Ivar.fill_if_empty (!next_conn_terminated) "NO CONNECTION";
           don't_wait_for(prepare_new_tail_node ip port ());
         end
@@ -569,6 +670,9 @@ let rec begin_master_service_listening_service a r w =
           (*TODO -- terminate the current tail connection*)
           !state.am_tail := true;
           !state.next_node := None;
+
+          should_terminate_client_responding_service := (Ivar.create());
+          don't_wait_for(launch_client_responding_service());
         end
         | MSMonitor.YouAreNewHead -> begin 
           debug INFO "We are the new head!";
@@ -655,6 +759,7 @@ let rec begin_master_connection master_ip master_port () =
 
                     (* Okay we've connected now we can wait for user requests*)
                     don't_wait_for(launch_client_listening_service());
+                    don't_wait_for(launch_client_responding_service());
 
                     begin_master_service_listening_service a r w
                     (*never()  We shall just literally do nothing but keep the socket alive for now*)
@@ -689,6 +794,7 @@ let rec begin_master_connection master_ip master_port () =
               !state.am_tail := true;
               !state.next_node := None;
 
+              don't_wait_for(launch_client_responding_service());
               begin_master_service_listening_service a r w
               (*never()  We shall just literally do nothing but keep the socket alive for now*)
 
@@ -721,10 +827,12 @@ let () =
          ~doc:"IP/Hostname of Master-Service"
       +> flag "-portchain" (required int)
          ~doc:"Replica chain communication port"
-      +> flag "-portuser" (required int)
-        ~doc:"Client interface communication port"
+      +> flag "-portuser" (optional_with_default 20000 int)
+        ~doc:"Client interface listening port"
+      +> flag "-portrespond" (optional_with_default 30000 int)
+        ~doc:"Client interface response port"
     )
-    (fun ip_master port_master port_chain port_user () ->
+    (fun ip_master port_master port_chain port_user port_user_resp () ->
 
       (Sys.command "clear")
       >>= fun _ ->
@@ -734,13 +842,14 @@ let () =
       debug NONE "########################";
       debug NONE "";
 
-      debug INFO ("Replica node started with Master-IP= " ^ ip_master ^ " Master-Port= " ^ string_of_int port_master ^ " Chain-Port= " ^ string_of_int port_chain ^ " User-Port= " ^ string_of_int port_user);
+      debug INFO ("Replica node started with Master-IP= " ^ ip_master ^ " Master-Port= " ^ string_of_int port_master ^ " Chain-Port= " ^ string_of_int port_chain ^ " Client-Listen-Port= " ^ string_of_int port_user ^ " Client-Respond-Port= " ^ string_of_int port_user_resp);
 
       (* Start initializing the state with cmdline args *)
       !state.master_ip   := ip_master;
       !state.master_port := port_master;
       !state.chain_port  := port_chain;
       !state.user_port   := port_user;
+      !state.resp_port   := port_user_resp;
       !state.id          := ((Unix.gethostname()), port_chain);
       debug NONE ("Replica Node ID: " ^ node_id_to_string !state.!id);
 
