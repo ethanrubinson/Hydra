@@ -25,14 +25,27 @@ module Work_Exec = struct
 
   let work_output_to_string o = o
   
-  let run_and_package_work input = 
-    Std.output_file ~filename:("slaveWork/" ^ (fst input)) ~text:(snd input);
-    ignore(Sys.command (("cs3110 compile slaveWork/" ^ (fst input))));
-    ignore(Sys.command (("cs3110 run slaveWork/" ^ (fst input) ^ " > slaveWork/work.out")) );
-    let chan = open_in "slaveWork/work.out" in
+  let run_and_package_work input =
+    let offset = ref 0 in
+    let rec find_open_dir () = 
+      if not ((Sys.command ("mkdir slaveWork_" ^ string_of_int !offset)) = 0) then begin 
+        offset := !offset + 1;
+        find_open_dir ()
+      end
+      else begin 
+        "slaveWork_" ^ string_of_int !offset ^ "/"
+      end
+    in
+    let dir = find_open_dir () in
+
+
+    Std.output_file ~filename:(dir ^ (fst input)) ~text:(snd input);
+    ignore(Sys.command (("cs3110 compile " ^ dir ^ (fst input))));
+    ignore(Sys.command (("cs3110 run " ^ dir ^ (fst input) ^ " > " ^ dir ^ "work.out")) );
+    let chan = open_in (dir ^ "work.out") in
     let work_result = (input_all chan) in
-    ignore(Sys.command (("rm slaveWork/" ^ (fst input))));
-    ignore(Sys.command ("rm slaveWork/work.out"));
+    ignore(Sys.command (("rm " ^ dir ^ (fst input))));
+    ignore(Sys.command ("rm " ^ dir ^ "work.out"));
     work_result
 
 
