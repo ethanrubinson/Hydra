@@ -2,6 +2,7 @@ open Async.Std
 open Debug
 open Protocol
 open Socket
+open UnixLabels
 
 (***********************************************************)
 (* STATE VARS                                              *)
@@ -44,14 +45,21 @@ let state = ref {
 let should_terminate = Ivar.create()
 let state_mutex = Mutex.create()
 
+let nework_state_string = ref "\027[0m\027[36m\027[1mIdle\027[0m\027[33m"
+
+let screen_debug_msg = ref ""
 
 (***********************************************************)
 (* UTILITY FUNCTIONS                                       *)
 (***********************************************************)
+let pad s l = s ^ (String.make (l - String.length s) ' ')
+
+let debug t string_to_print = (let t_String = "\027[1m" ^ (match t with |INFO -> "\027[1m\027[36m" |WARN -> "\027[1m\027[33m"|ERROR -> "\027[1m\027[31m"| FATAL -> "\027[31m\027[5m"|NONE -> "\027[1m\027[32m") in (screen_debug_msg := t_String ^ string_to_print); if String.length !screen_debug_msg > 50 then begin (screen_debug_msg := String.sub (!screen_debug_msg) 0 47); (screen_debug_msg := (!screen_debug_msg) ^ "...\027[0m") end  else (screen_debug_msg := (!screen_debug_msg) ^ "\027[0m"))
+
 
 let is_none (thing : 'a option) = match thing with | None -> true | _ -> false
 
-let get_some (thing : 'a option) = match thing with | Some x -> x | _ -> failwith "Tried to get Some of None"
+let get_some (thing : 'a option) = match thing with | Some x -> x | _ -> (debug FATAL "Tried to get Some of None."); failwith "Tried to get Some of None"
 
 let get_node_writer (node : node) : Async_extra.Import.Writer.t = 
   let (mconn,_) = node in
@@ -76,6 +84,19 @@ let node_to_string (node : node) : string =
   let (_,node_id) = node in
   node_id_to_string node_id
 
+let node_to_screen_print (node : node) : string = 
+  let ((a,w,r),node_id) = node in
+  (Address.to_string a)
+
+let node_to_screen_print_chain_port (node : node) : string = 
+  let (_,node_id) = node in
+  let (_,port) = node_id in
+  (string_of_int port)
+
+let node_to_screen_print_listen_port (node : node) : string = 
+  let (_,node_id) = node in
+  let (_,port) = node_id in
+  (string_of_int (port+10005))
 
 let get_tail_node () : node = 
   (*(Mutex.lock state_mutex); *)
@@ -92,7 +113,7 @@ let get_head_node () : node =
   let res = 
     match !state.!head_node with 
     | Some x -> x 
-    | None -> (debug FATAL "Requested a non-existant tail node."); failwith "State corrupted"
+    | None -> (debug FATAL "Requested a non-existant head node."); failwith "State corrupted"
   in
   (*(Mutex.unlock state_mutex);*)
   res
@@ -122,11 +143,77 @@ let test_and_set_pending_tail () : bool =
   (*(Mutex.unlock state_mutex);*)
   succ
 
+let eye = ref ""
+let eye_list = ["⣾";"⣽";"⣻";"⢿";"⡿";"⣟";"⣯";"⣷"]
+let eye_index = ref 0
+let eye_length = List.length eye_list
+let print_screen () = 
+  don't_wait_for(Sys.command "clear"
+       >>= fun _ ->
+  (eye := List.nth eye_list (!eye_index));
+  (eye_index := !eye_index + 1);
+
+  if !eye_index = eye_length then
+  (eye_index := 0);
+
+  print_endline(
+  "\027[0m\027[32m\027[1m                                                             .r                                             
+                                           .                 2,     .                                        
+                                          ;.                ,B     ,                                        
+                                         .2                 @:    r,                                        
+                                         A,     .          ;@    h:                                         
+                                        :@    .;           @X   @r      .                                            ,--,                                                 
+                                        @;   ,2           i@  :@#     r,                                          ,--.'|                                                 
+                                       r@   r@            @@M#@@    s@r                                        ,--,  | :                   ,---,                         
+                                       @#  3@      ;     A@@@@@@  2@@,                                      ,---.'|  : '                 ,---.'|   __  ,-.               
+                                      2@@r@@2    GM.    .@@@@@@@@@@@                                        |   | : _' |                 |   | : ,' ,'/ /|               
+                                      @@@@@@r .&@@      @@@@@@@@@@@@ ,r,                                    :   : |.'  |       .--,      |   | | '  | |' |    ,--.--.    
+                                     #@@@@@@@@@@#     X@@@@@@@@@@@@; ,.                                     |   ' '  ; :     /_ ./|    ,--.__| | |  |   ,'   /       \\   
+                                    :@@@@@@@@@@@; :, @@@@@@@@@@@@@9 ;5    .                                 '   |  .'. |  , ' , ' :   /   ,'   | '  :  /    .--.  .-. |  
+                                   #@@@@@@@@@@@@@2, #@@@@@@@@@@@@@.r     .,                                 |   | :  | ' /___/ \\: |  .   '  /  | |  | '      \\__\\/: . .  
+                                 :@@@@@@@@@@@@@@@5  @@\027[0m\027[31m"^(!eye)^"\027[0m\027[32m\027[1m@@@@@@@@@@.ir\027[0m\027[32m@M\027[0m\027[32m\027[1m  ;.                                  '   : |  : ;  .  \\  ' |  '   ; |:  | ;  : |      ,\" .--.; |  
+                                .@@@@@@@@@@@@@@:   ,@G;@@@@@@@@&  A\027[0m\027[32mS@@X\027[0m\027[32m\027[1mr.     .                             |   | '  ,/    \\  ;   :  |   | '/  ' |  , ;     /  /  ,.  |  
+                                @@\027[0m\027[31m"^(!eye)^"\027[0m\027[32m\027[1m@@@@@@@@@@&.    ,@@@@@@@@@A  .@\027[0m\027[32m:@@;\027[0m\027[32m\027[1mGr     :;                             ;   : ;--'      \\  \\  ;  |   :    :|  ---'     ;  :   .'   \\ 
+                                @s;@@@@@@@@@:\027[0m\027[32m,@@@.\027[0m\027[32m\027[1m @@@@@@@@A    s@ \027[0m\027[32m2,\027[0m\027[32m\027[1m@S\027[0m\027[32m@&\027[0m\027[32m\027[1m   ;,                              |   ,/           :  \\  \\  \\   \\  /             |  ,     .-./ 
+                                @@@@@@@@@@s\027[0m\027[32m,#@@@@;\027[0m\027[32m\027[1m#@@@@@@h      @@\027[0m\027[32mri\027[0m\027[32m\027[1m@@.\027[0m\027[32m@H\027[0m\027[32m\027[1m ;@r                               '---'             \\  ' ;   `----'               `--`---'     
+                               ;@@@@@@@@i   \027[0m\027[32m,M@@.\027[0m\027[32m\027[1m@@@@@@2       M@@@@@# \027[0m\027[32mSS\027[0m\027[32m\027[1m@@,   .                                                `--`                                      
+                              r@@@@@@@S       \027[0m\027[32m@@\027[0m\027[32m\027[1m 2ii2s        ,@@@@@@@@@@@   .;                               
+                             G@@@@@@2         \027[0m\027[32m@@@#B,\027[0m\027[32m\027[1m          @@@@@@@@@@@@ ::.                             \027[0m\027[33m,---------------------------------------------------------,==.
+                             \027[0m\027[32m\027[1m@#HHM&           \027[0m\027[32m@@@@@:\027[0m\027[32m\027[1m        5@@@@@@@@@@@@@@;                              \027[0m\027[33m/                                                         /__  \\
+                             \027[0m\027[32m\027[1m@#2@i           \027[0m\027[32mM@@@@@      5\027[0m\027[32m\027[1m;@@@@@@@@@@@@@@@#:                              \027[0m\027[33m\\        | \027[0m\027[33m\027[1mMaster-Service Configuration Details\027[0m\027[33m |         |(_\\ /
+                                            \027[0m\027[32m;@@@@@     .@M\027[0m\027[32m\027[1mA@@@@@@@@@@@@@2:\027[0m\027[32m                                \027[0m\027[33m/  --- . --- . --- . --- . --- . --- . --- . --- . --- .  \\-`-'
+                                            \027[0m\027[32m@@@@@:    s@@\027[0m\027[32m\027[1m.@\027[0m\027[31m"^(!eye)^"\027[0m\027[32m\027[1mX@@@@@@@@@@:\027[0m\027[32m.@&                               \027[0m\027[33m>                                                         /
+                                           \027[0m\027[32m@@@@@A    H@@M\027[0m\027[32m\027[1m,@;@@@@@@@@@S.\027[0m\027[32m5@@@;                              \027[0m\027[33m} » IP   : \027[0m\027[33m\027[1m" ^ (pad (UnixLabels.string_of_inet_addr (List.hd (Array.to_list ((UnixLabels.gethostbyname (UnixLabels.gethostname())).h_addr_list)))) 47) ^ "\027[0m\027[33m}
+                                          \027[0m\027[32mH@@@@@    @@@@G\027[0m\027[32m\027[1m.@@@@@@@@@H,\027[0m\027[32mi@@@@@@                              \027[0m\027[33m| » Port : \027[0m\027[33m\027[1m"^ (pad (string_of_int (!state.!port)) 47)^"\027[0m\027[33m\\
+                                          \027[0m\027[32m@@@@@@   @@@@@\027[0m\027[32m\027[1m M@@@@@@@B\027[0m\027[32m    H@@@@@                              \027[0m\027[33m\\                                                         /
+                                         \027[0m\027[32mi@@@@@@, @@@@@\027[0m\027[32m\027[1m G@@@@@@A\027[0m\027[32m      S@@@@@                              \027[0m\027[33m}                                                         {
+                                         \027[0m\027[32mA@@@@@@rS@@@#\027[0m\027[32m\027[1m #@@@@@X\027[0m\027[32m       H@@@@@S                              \027[0m\027[33m\\                 | \027[0m\027[33m\027[1mChain Information\027[0m\027[33m |                   /
+                         \027[0m\027[32m:;:.            \027[0m\027[32mA@@@@@@ @@@@X\027[0m\027[32m\027[1m 923A5\027[0m\027[32m     .5@@@@@@@B                               \027[0m\027[33m}  --- . --- . --- . --- . --- . --- . --- . --- . --- .  >
+                        \027[0m\027[32m,r5@@@           2@@@@@,X@@@@@@#H;  r:2@@@@@@@@@@r  .r9#@@@@@@@@@Ai:              \027[0m\027[33m>                                                         /
+                      \027[0m\027[32m.5A@@@@@           ,@@@@@ @@@@@@@A;i#@@@@@@@@@@@@@3r@@@@@@@@@@@@@@@@@@@@A:          \027[0m\027[33m} » Head Node ID   : \027[0m\027[33m\027[1m" ^ pad (if is_none !state.!head_node then "N/A" else node_to_screen_print (get_head_node())) 37^ "\027[0m\027[33m}
+                          \027[0m\027[32m#@@@&           @@@@i:@@@@@@.;@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@2        \027[0m\027[33m|     Chain Port   : \027[0m\027[33m\027[1m"^ pad (if is_none !state.!head_node then "N/A" else node_to_screen_print_chain_port (get_head_node())) 37^ "\027[0m\027[33m\\
+                           \027[0m\027[32m@@@@          ,X@@@.9@@@@A G@@@@@@@@@@@@@@@@@@@@@@@#Sr;;r2@@@@@@@@@@@@@@:      \027[0m\027[33m\\     Listen Port  : \027[0m\027[33m\027[1m"^ pad (if is_none !state.!head_node then "N/A" else node_to_screen_print_listen_port (get_head_node())) 37^ "\027[0m\027[33m/
+                         \027[0m\027[32m:,M@@@,,      2@@ @@@ #@@@A @@@@@#2S2H@@@@@@@@@@@@@@:.2M##As.;@@@@@@@@@@@@@.     \027[0m\027[33m}                                                         {
+                          \027[0m\027[32m,riGB@@@#&B@@@@@s:@@ @@@# @@@@@s S3i: #@@@@@@@@@@@::@@@@@@@@ ,5.S@@@@@@@@@@     \027[0m\027[33m\\ » Tail Node ID   : \027[0m\027[33m\027[1m"^ pad (if is_none !state.!tail_node then "N/A" else node_to_screen_print (get_tail_node())) 37^ "\027[0m\027[33m/
+                              \027[0m\027[32ms@@@@@@@@@@@@;i@.#@@ &@@@@A @@@@@5 @@@@@@@@@@@ @@@@@@@@@@2A &@@@@@@@@@@G    \027[0m\027[33m}     Chain Port   : \027[0m\027[33m\027[1m"^ pad (if is_none !state.!tail_node then "N/A" else node_to_screen_print_chain_port (get_tail_node())) 37^ "\027[0m\027[33m>
+                                  \027[0m\027[32mrM@@M3;    iS2@S:@@@@@ 3@@@@@@ @@@@@@@@@@@ @@@@@@@@@@@;,@@@@@@@@@@@@    \027[0m\027[33m}     Respond Port : \027[0m\027[33m\027[1m"^ pad (if is_none !state.!tail_node then "N/A" else node_to_screen_print_listen_port (get_tail_node())) 37^ "\027[0m\027[33m}
+                                                \027[0m\027[32m@.@@@@@2.@@@@@@A 2h@@@@@@@@@ H@@@@@@@@@@@ @@@@@@@@@@@@    \027[0m\027[33m>                                                         /
+                   \027[0m\027[32m,:  r&@@@@@@@@@@@@@@Gr.       ;@@@@h @@@@@@@@. i@@@@@@@@@h @@@@@@@@@@:  ;#@@@@@@@@@    \027[0m\027[33m|                                                         \\
+               \027[0m\027[32mA@@@@2A@@@B3Sii5hM@@@@@@@@@@@9:     r#5 @@@@@@@r,A@@@@@@@@@@@@r;@@@@@@@@     5@@@@@@@@S    \027[0m\027[33m\\                   | \027[0m\027[33m\027[1mNetwork Status\027[0m\027[33m |                    /
+           \027[0m\027[32m,s#S #@@r:B@             .2@@@@@@@@@@r    i@@@@@@2;M@@@@@@@@@@@@Mi  @@@@@@H    .@@@@@@@@@B     \027[0m\027[33m}  --- . --- . --- . --- . --- . --- . --- . --- . --- .  {
+     \027[0m\027[32m:r9@@@@@h.@@@@@@@@                 ,h@@@@@@@@@X,ss3#@2  ;X2X92ssr;:,,    #@@@@@;   s@@@@@@@@@@S      \027[0m\027[33m\\                                                         /
+    \027[0m\027[32m:#@@@@@@ ;@@@9iS@@                      rM@@@@@@@@9;:.         9@@@@@    #@@#&2. r@@@@@@@@@@@A        \027[0m\027[33m} » Chain Length  : \027[0m\027[33m\027[1m"^ pad (string_of_int (max 0 (!state.!chain_size))) 38^ "\027[0m\027[33m>
+      \027[0m\027[32m@@@@@  @;   i  ,                         .i&@@@@@@@@@@#2;.  :h3399    :Gr:;rX@@@@@@@@@@@@X          \027[0m\027[33m| » Network State : " ^ pad (if !state.!chain_size > 0 then "\027[0m\027[32m\027[1mActive\027[0m\027[33m" else begin if !state.!chain_size = 0 then "\027[0m\027[36m\027[1mIdle\027[0m\027[33m" else "\027[0m\027[31m\027[1mRestart Needed.\027[0m\027[33m" end) 60^"{____
+     \027[0m\027[32m;@@@@@:5iX@@@r                         X#@@#2rr2B@@@@@@@@@@@@@#A9hA@@@@@@@@@@@@@@@@@@@@G,            \027[0m\027[33m}                 ↪ \027[0m"^ pad !screen_debug_msg 55 ^ "\027[0m\027[33m|__( \\
+     \027[0m\027[32m@@@@@@@@@@@@s                        :@@@@@@@@Bi,  ,iA@@@@@@@@@@@@@@@@@@@@@@@@@@@@@h;                \027[0m\027[33m\\                                                         \\    /
+    \027[0m\027[32m@@@@@@@H&@@@s                         3 ;@;             .S5:,;i3AM@@@###@@@MAXi;                       \027[0m\027[33m`---------------------------------------------------------`=='  
+   \027[0m\027[32mM@@3:      @r                            ;.               i          ,39i:                               
+   \027[0m\027[32mr.                                                                    r,                                 \027[0m"); return ())
+
 
 (***********************************************************)
 (* MASTER-SERVICE FUNCTIONS                                *)
 (***********************************************************)
-
 
 let rec when_should_terminate () = 
   (Ivar.read should_terminate) >>| fun _ -> ()
@@ -165,7 +252,8 @@ let restructure_chain_for_failed_node (node:node) =
   let curr_tail = get_tail_node() in
   if nodes_are_equal node curr_head then begin
     (*The head has failed*)
-    debug WARN (node_to_string node ^ " Was the head node. Assigning new head.");
+    (*debug WARN (node_to_string node ^ " Was the head node. Assigning new head.");*)
+    debug WARN ("The head node has died. Reassigning.");
     (*Find the next node in the chain (the one after the head)*)
     let dead_head_table_entry = Hashtbl.find chain (get_node_id curr_head) in
     let (_, dead_head_node, dead_head_next) = dead_head_table_entry in
@@ -175,10 +263,12 @@ let restructure_chain_for_failed_node (node:node) =
       (* ..... We're fucked *)
       debug FATAL ("All Replica nodes have failed");
       (Ivar.fill_if_empty should_terminate "All replicas have failed");
-
+      !state.chain_size := (-1);
+      !state.head_node := None;
+      !state.tail_node := None;
       (*(Mutex.unlock state_mutex);*)
-      return() (*Returning should get rid of the socket connection dispatched to the failed node*)
-
+      (*return()*) (*Returning should get rid of the socket connection dispatched to the failed node*)
+      return ()
     end
     else begin
       (*This is the exepcted scenario, message the next node in the chain to alter it of its new position*)
@@ -201,7 +291,8 @@ let restructure_chain_for_failed_node (node:node) =
   else begin
     if nodes_are_equal node curr_tail then begin
       (*The tail has failed*)
-      debug WARN (node_to_string node ^ " Was the tail node. Assigning a new tail.");
+      (*debug WARN (node_to_string node ^ " Was the tail node. Assigning a new tail.");*)
+      debug WARN ("The tail node has died. Reassigning.");
       (*Find the prev node in the chain (the one before the tail)*)
       let dead_tail_table_entry = Hashtbl.find chain (get_node_id curr_tail) in
       let (dead_tail_prev, dead_tail_node, _) = dead_tail_table_entry in
@@ -210,11 +301,11 @@ let restructure_chain_for_failed_node (node:node) =
       if (is_none dead_tail_prev) then begin
         debug FATAL ("All Replica nodes have failed");
         (Ivar.fill_if_empty should_terminate "All replicas have failed");
-
+        !state.chain_size := (-1);
 
         (*(Mutex.unlock state_mutex);*)
-        return() (*Returning should get rid of the socket connection dispatched to the failed node*)
-
+        (*return()*) (*Returning should get rid of the socket connection dispatched to the failed node*)
+        return ()
       end
       else begin
         (*This is the exepcted scenario, message the next node in the chain to alter it of its new position*)
@@ -234,7 +325,8 @@ let restructure_chain_for_failed_node (node:node) =
 
     else begin
       (*No need to check if prev/succ exists since this is a middle node*)
-      debug WARN (node_to_string node ^ " Was a middle node. Cutting it out of the chain");
+      (*debug WARN (node_to_string node ^ " Was a middle node. Cutting it out of the chain");*)
+      debug WARN ("A middle node died. Re-linking chain.");
       (*Find the prev node in the chain (the one before the tail)*)
       let dead_mid_table_entry = Hashtbl.find chain (get_node_id node) in
       let (dead_mid_prev, dead_mid_node, dead_mid_next) = dead_mid_table_entry in
@@ -270,7 +362,7 @@ let monitor_node (node : node) =
     MSHeartbeat.receive r
     >>= function
     | `Eof -> begin
-        debug WARN (node_to_string node ^ " Has died.");
+        (*debug WARN (node_to_string node ^ " Has died.");*)
         restructure_chain_for_failed_node node 
       end
     | `Ok _ -> begin (*This is pretty useless. Since nodes are fail-stop `Eof will always trigger*)
@@ -293,35 +385,35 @@ let begin_listening_service_on_port p =
     (Tcp.on_port p)
     (fun addr r w  ->
        let mconnection = (addr,r,w) in
-       let addr_string = Address.to_string addr in
-       debug INFO ("[" ^ addr_string ^ "] Connection established. Starting session");
-       debug INFO ("[" ^ addr_string ^ "] Waiting for initialization request.");
+       (*let addr_string = Address.to_string addr in*)
+       debug INFO ("Incoming connection request.");
+       debug INFO ("Waiting for initialization request.");
        MSReq.receive r
        >>= function
        | `Eof -> begin 
-           debug WARN ("[" ^ addr_string ^ "] Socket was closed by remote. Terminating session.");
+           debug WARN ("Socket was closed by node.");
            return ()
          end
        | `Ok msg -> begin 
            match msg with
            | MSReq.InitRequest((ip,port)) -> begin 
                let connected_node_id = (ip,port) in
-               debug INFO ("[" ^ addr_string ^ "] Initialization request received.");
+               debug INFO ("Initialization request received.");
 
                if not (chain_exists()) then begin
                  (* Since there are no head nodes. Send a request indicating the start of a new replica chain *)
-                 debug INFO ("[" ^ addr_string ^ "] No chain exists, sending FirstChainMember response.");
+                 debug INFO ("Sending FirstChainMember response.");
                  (MSRes.send w MSRes.FirstChainMember);
 
                  (* Wait for ACK *)
                  MSAck.receive r 
                  >>= function 
                  | `Eof -> begin
-                     debug ERROR ("[" ^ addr_string ^ "] Failed to receive FirstChainMember ACK. Terminating session.");
+                     debug ERROR ("Failed to receive FCM ACK.");
                      return ()
                    end
                  | `Ok MSAck.FirstChainMemberAck -> begin
-                     debug INFO ("[" ^ addr_string ^ "] Got FirstChainMember ACK. Initializing chain.");
+                     debug INFO ("Got FCM ACK. Initializing chain.");
                      (* Perform sanity check to ensure another request did not come in while we were waiting for this ACK*)
                      if not (chain_exists()) then begin
 
@@ -331,7 +423,7 @@ let begin_listening_service_on_port p =
                        !state.tail_node := Some(new_chain_node);
                        !state.chain_size := !state.!chain_size + 1;
                        Hashtbl.add chain connected_node_id (None,new_chain_node,None);
-                       debug NONE ("Chain initialized. FirstChainMember = " ^ node_to_string new_chain_node ^ ".");
+                       debug NONE ("Chain initialized.");
                        (MSRes.send w MSRes.InitDone);
                        (*(Mutex.unlock state_mutex);*)
 
@@ -340,13 +432,13 @@ let begin_listening_service_on_port p =
                      end
                      else begin
                        (* Strangely enough, the initial request was orphaned by another node initialization *)
-                       debug WARN ("[" ^ addr_string ^ "] Initialization as FirstChainMember was orphaned.");
+                       debug WARN ("Initialization as FCM was orphaned.");
                        (MSRes.send w MSRes.InitFailed);
                        return ()
                      end
                    end
                  | _ -> begin
-                     debug ERROR ("[" ^ addr_string ^ "] Sent unexpected response. Expected FirstChainMemberAck. Terminating session");
+                     debug ERROR ("Got unexpected response.");
                      return ()
                    end
                end (* Case of new chain *)
@@ -356,14 +448,14 @@ let begin_listening_service_on_port p =
 
                  (* Check to ensure that there is not currently a new pending tail node. This would royally mess up our state *)
                  if (test_and_set_pending_tail() = false) then begin 
-                   debug WARN ("[" ^ addr_string ^ "] Chain exists but new tail node is already pending. Sending InitFailed");
+                   debug WARN ("New tail node is already pending.");
                    (MSRes.send w MSRes.InitFailed);
                    return ()
                  end (* Case of pending tail *)
 
                  else begin
                    (* There is allready an established chain. Initialize this new node as the new tail *)
-                   debug INFO ("[" ^ addr_string ^ "] A chain already exists and no pending tails, sending NewTail response.");
+                   debug INFO ("Sending NewTail response.");
 
                    (* Alert the current tail that it is about to lose its job. When the NewTail ACK is received. 
                       it is assumed that the communication between the current tail and the new tail is completed *)
@@ -378,7 +470,7 @@ let begin_listening_service_on_port p =
                    MSAck.receive r 
                    >>= function 
                    | `Eof -> begin
-                       debug ERROR ("[" ^ addr_string ^ "] Failed to receive NewTail ACK. Terminating session");
+                       debug ERROR ("Failed to receive NT ACK.");
                        (*(Mutex.lock state_mutex);*)
                        (!state.pending_new_tail := false);
                        (*(Mutex.unlock state_mutex);*)
@@ -400,7 +492,7 @@ let begin_listening_service_on_port p =
                        !state.chain_size := !state.!chain_size + 1;
 
 
-                       debug NONE ("New tail initialized = " ^ node_to_string new_chain_node ^ ".");
+                       debug NONE ("A new tail was initialized.");
 
                        (*This has been taken out for the momment. It is unecessary and may cause problems*)
                        (*(MSRes.send w MSRes.InitDone);*)
@@ -412,7 +504,7 @@ let begin_listening_service_on_port p =
 
                      end
                    | _ -> begin
-                       debug ERROR ("[" ^ addr_string ^ "] Sent unexpected response. Expected NewTailAck. Terminating session");
+                       debug ERROR ("Got unexpected response.");
                        return ()
                      end
 
@@ -428,7 +520,7 @@ let begin_listening_service_on_port p =
 
     )
   >>= fun server ->
-  debug INFO "Started TCP Server";
+  debug INFO "Hyrda Started. Waiting on first node.";
   when_should_terminate()
   >>= fun _ ->
   (Tcp.Server.close server)
@@ -443,8 +535,8 @@ let begin_listening_service_on_port p =
 let () =
 
   Command.async_basic
-    ~summary: "Run the DDWQ Master-Service"
-    ~readme: (fun () -> "This is the master service for the DDWQ replication chain, it must be started before any other node.")
+    ~summary: "Run Hydra's 'Master-Service'"
+    ~readme: (fun () -> "This is the Master-Service for the DDWQ replication chain.")
     Command.Spec.(
       empty
       +> flag "-config" (optional_with_default "DDWQ.cfg" string)
@@ -455,16 +547,32 @@ let () =
        (Sys.command "clear")
        >>= fun _ ->
 
-       debug NONE "##########################";
-       debug NONE "####  MASTER-SERVICE  ####";
-       debug NONE "##########################";
-       debug NONE "";
+
+  
+
+(*"
+        ,--,                                                 
+      ,--.'|                                                 
+   ,--,  | :                   ,---,                         
+,---.'|  : '                 ,---.'|   __  ,-.               
+|   | : _' |                 |   | : ,' ,'/ /|               
+:   : |.'  |       .--,      |   | | '  | |' |    ,--.--.    
+|   ' '  ; :     /_ ./|    ,--.__| | |  |   ,'   /       \\   
+'   |  .'. |  , ' , ' :   /   ,'   | '  :  /    .--.  .-. |  
+|   | :  | ' /___/ \\: |  .   '  /  | |  | '      \\__\\/: . .  
+'   : |  : ;  .  \\  ' |  '   ; |:  | ;  : |      ,\" .--.; |  
+|   | '  ,/    \\  ;   :  |   | '/  ' |  , ;     /  /  ,.  |  
+;   : ;--'      \\  \\  ;  |   :    :|  ---'     ;  :   .'   \\ 
+|   ,/           :  \\  \\  \\   \\  /             |  ,     .-./ 
+'---'             \\  ' ;   `----'               `--`---'     
+                   `--`                                      
+"*)
 
 
        let get_port_number_from_string line =
          try ( let x = int_of_string line in if x < 1024 || x > 49151 then raise (Failure "") else x ) with 
          | Failure e -> begin
-             debug FATAL "\"port\" needs to be an integer in the range [1024-49151].";
+             debug FATAL "\"port\" must be within [1024-49151].";
              failwith "Invalid port format"
            end
        in
@@ -477,17 +585,17 @@ let () =
                (*(Mutex.unlock state_mutex)*)
              end
              else begin
-               debug FATAL ("Invalid configuration prefix: \"" ^ prefix ^ "\" encountered.");
+               debug FATAL ("Invalid configuration prefix.");
                failwith "Configuration file not formatted propperly"  
              end
            end
          | _               -> begin
-             debug FATAL ("Could not parse line: \"" ^ s ^"\" in configuration file.");
+             debug FATAL ("Could not parse config line.");
              failwith "Failed parsing configuration file"
            end
        in
 
-       debug INFO "Loading configuration file...";
+       debug INFO "Loading configuration file.";
        try_with (fun () -> Reader.file_lines config) 
        >>= function
        |Core.Std.Result.Error e -> begin
@@ -505,11 +613,12 @@ let () =
               (*(Mutex.lock state_mutex);*)
               let port_num = !state.!port in
               (*(Mutex.unlock state_mutex);*)
-              debug NONE ("Running on port: " ^ (string_of_int port_num));
+              debug NONE ("Starting Hydra on port: " ^ (string_of_int port_num));
 
 
-              ignore(every ~stop:(when_should_terminate()) (Core.Std.sec 3.0) (
-                  fun () -> print_chain_structure()
+
+              ignore(every ~stop:((*when_should_terminate()*) never()) (Core.Std.sec 0.2) (
+                  fun () -> (*print_chain_structure()*) print_screen()
                 ));
 
 
@@ -519,7 +628,8 @@ let () =
                 (*((after (Core.Std.sec 150.0)) >>= fun _ -> (Ivar.fill_if_empty should_terminate "Timed out"); (return 0)) ;*)
 
                 (begin_listening_service_on_port port_num) ;
-                ((when_should_terminate()) >>= fun _ -> return 0)
+                ((when_should_terminate()) >>= fun _ -> return 0) ;
+                never()
               ] >>= fun  x -> return x 
 
             end);
