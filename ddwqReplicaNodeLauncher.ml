@@ -713,7 +713,7 @@ let rec begin_master_connection master_ip master_port () =
 
       (* Get our initialization type from the master. This is either FirstChainMember or NewTail*)
       debug INFO "Sending our initialization request to the Master-Service with our ID";
-      MSReq.send w (MSReq.InitRequest(!state.!id));
+      MSReq.send w (MSReq.InitRequest(fst !state.!id, snd !state.!id, (!state.!user_port,!state.!resp_port)));
 
 
       debug INFO "Waiting for Master-Service resopnse to initialization request";
@@ -815,15 +815,15 @@ let () =
     ~readme: (fun () -> "This is a replica node of the DDWQ replication chain, the Master-Service must be running before it is launched.")
     Command.Spec.(
       empty
-      +> flag "-masterip" (optional_with_default "localhost" string)
-        ~doc:"IP/Hostname of Master-Service"
-      +> flag "-masterport" (optional_with_default 33333 int)
-        ~doc:"IP/Hostname of Master-Service"
-      +> flag "-portchain" (required int)
+      +> flag "--master-ip" (optional_with_default "localhost" string)
+        ~doc:"IP/Hostname of the Hydra node running the Master-Service."
+      +> flag "--master-port" (optional_with_default 33333 int)
+        ~doc:"Master listening port for Hydra Replica nodes."
+      +> flag "--chain-port" (required int)
         ~doc:"Replica chain communication port"
-      +> flag "-portuser" (optional_with_default 20000 int)
+      +> flag "--request-port" (optional_with_default 20000 int)
         ~doc:"Client interface listening port"
-      +> flag "-portrespond" (optional_with_default 30000 int)
+      +> flag "--response-port" (optional_with_default 30000 int)
         ~doc:"Client interface response port"
     )
     (fun ip_master port_master port_chain port_user port_user_resp () ->

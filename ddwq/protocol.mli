@@ -23,6 +23,18 @@ end
 (** { DDWQ Protocol } **)
 (***********************)
 
+module ClientToMasterRequest : sig
+  type t =  HeadAndTailRequest
+                
+  include Marshalable with type t := t
+end
+
+module ClientToMasterResponse : sig
+  type t = | HeadAndTailResponse of ((string * int) * (string * int)) option (*ip * port req -> ip * port resp*)
+                
+  include Marshalable with type t := t
+end
+
 
 module ClientInitResponse : sig
   type t = | InitForWorkTypeFailed of string
@@ -88,7 +100,7 @@ module MasterServiceAck : sig
 end
 
 module MasterServiceRequest : sig
-  type t = InitRequest of (string * int)
+  type t = InitRequest of (string * int * (int * int))
 
   include Marshalable with type t := t
 end

@@ -20,6 +20,18 @@ end
 (** { Protocol messages} *)
 (*************************)
 
+module ClientToMasterRequest = struct
+  type t =  HeadAndTailRequest
+                
+  include Marshaller
+end
+
+module ClientToMasterResponse = struct
+  type t = | HeadAndTailResponse of ((string * int) * (string * int)) option (*ip * port req -> ip * port resp*)
+                
+  include Marshaller
+end
+
 module ClientInitResponse  = struct
   type t = | InitForWorkTypeFailed of string
               | InitForWorkTypeSucceeded
@@ -82,7 +94,7 @@ module MasterServiceAck = struct
 end
 
 module MasterServiceRequest = struct
-  type t = InitRequest of (string * int)  (*hostname * listening port *)
+  type t = InitRequest of (string * int * (int * int))  (*hostname * chain port * (user_list * user_resp)*)
 
   include Marshaller
 end

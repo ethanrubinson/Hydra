@@ -1,3 +1,23 @@
+(*
+        ,--,                                                 
+      ,--.'|                                                 
+   ,--,  | :                   ,---,                         
+,---.'|  : '                 ,---.'|   __  ,-.               
+|   | : _' |                 |   | : ,' ,'/ /|               
+:   : |.'  |       .--,      |   | | '  | |' |    ,--.--.    
+|   ' '  ; :     /_ ./|    ,--.__| | |  |   ,'   /       \   
+'   |  .'. |  , ' , ' :   /   ,'   | '  :  /    .--.  .-. |  
+|   | :  | ' /___/ \: |  .   '  /  | |  | '      \__\/: . .  
+'   : |  : ;  .  \  ' |  '   ; |:  | ;  : |      ," .--.; |  
+|   | '  ,/    \  ;   :  |   | '/  ' |  , ;     /  /  ,.  |  
+;   : ;--'      \  \  ;  |   :    :|  ---'     ;  :   .'   \ 
+|   ,/           :  \  \  \   \  /             |  ,     .-./ 
+'---'             \  ' ;   `----'               `--`---'     
+                   `--`                                      
+
+              - Developed by Ethan Rubinson. ethan@tebrotech.com "*)
+
+
 open Async.Std
 open Debug
 open Protocol
@@ -10,11 +30,12 @@ open UnixLabels
 
 type ip_address     = string
 type listening_port = int
+type user_ports = (int * int) (*listening port * responding port)*)
 
 type master_connection = Async_extra.Import.Socket.Address.Inet.t * Async_extra.Import.Reader.t * Async_extra.Import.Writer.t
 
 type node_id  = ip_address * listening_port
-type node     = master_connection * node_id
+type node     = master_connection * node_id * user_ports
 
 type next_node    = node option
 type prev_node    = node option 
@@ -25,7 +46,9 @@ type chain_table        = (node_id , chain_table_entry) Hashtbl.t
 let (chain : chain_table) = Hashtbl.create 10
 
 type chain_state = {
-  port      : int ref;
+  port        : int ref;
+  client_port : int ref;
+
   head_node : node option ref;
   tail_node : node option ref;
 
@@ -34,7 +57,9 @@ type chain_state = {
 }
 
 let state = ref {
-    port      = ref (-1);
+    port        = ref (-1);
+    client_port = ref (-1);
+
     head_node = ref None;
     tail_node = ref None;
 
@@ -61,19 +86,28 @@ let is_none (thing : 'a option) = match thing with | None -> true | _ -> false
 
 let get_some (thing : 'a option) = match thing with | Some x -> x | _ -> (debug FATAL "Tried to get Some of None."); failwith "Tried to get Some of None"
 
+let get_node_liss_client_info (node : node) : (string * int) = 
+  let (_,(ip,_),(lp,_)) = node in
+  (ip,lp)
+
+let get_node_resp_client_info (node : node) : (string * int) = 
+  let (_,(ip,_),(_,rp)) = node in
+  (ip,rp)
+
+
 let get_node_writer (node : node) : Async_extra.Import.Writer.t = 
-  let (mconn,_) = node in
+  let (mconn,_,_) = node in
   let (_,_,w) = mconn in
   w
 
 let get_node_reader (node : node) : Async_extra.Import.Reader.t = 
-  let (mconn,_) = node in
+  let (mconn,_,_) = node in
   let (_,r,_) = mconn in
   r
 
 
 let get_node_id (node : node) : node_id = 
-  let (_,node_id) = node in
+  let (_,node_id,_) = node in
   node_id
 
 let node_id_to_string (nodeId : node_id) : string = 
@@ -81,22 +115,25 @@ let node_id_to_string (nodeId : node_id) : string =
   "{Node@" ^ ip ^ (string_of_int port) ^ "}"
 
 let node_to_string (node : node) : string = 
-  let (_,node_id) = node in
+  let (_,node_id,_) = node in
   node_id_to_string node_id
 
 let node_to_screen_print (node : node) : string = 
-  let ((a,w,r),node_id) = node in
+  let ((a,w,r),node_id,_) = node in
   (Address.to_string a)
 
 let node_to_screen_print_chain_port (node : node) : string = 
-  let (_,node_id) = node in
+  let (_,node_id,_) = node in
   let (_,port) = node_id in
   (string_of_int port)
 
 let node_to_screen_print_listen_port (node : node) : string = 
-  let (_,node_id) = node in
-  let (_,port) = node_id in
-  (string_of_int (port+10005))
+  let (_,_,(liss,_)) = node in
+  (string_of_int liss)
+
+let node_to_screen_print_respond_port (node : node) : string = 
+  let (_,_,(_,resp)) = node in
+  (string_of_int resp)
 
 let get_tail_node () : node = 
   (*(Mutex.lock state_mutex); *)
@@ -184,7 +221,7 @@ let print_screen () =
                                             \027[0m\027[32m;@@@@@     .@M\027[0m\027[32m\027[1mA@@@@@@@@@@@@@2:\027[0m\027[32m                                \027[0m\027[33m/  --- . --- . --- . --- . --- . --- . --- . --- . --- .  \\-`-'
                                             \027[0m\027[32m@@@@@:    s@@\027[0m\027[32m\027[1m.@\027[0m\027[31m"^(!eye)^"\027[0m\027[32m\027[1mX@@@@@@@@@@:\027[0m\027[32m.@&                               \027[0m\027[33m>                                                         /
                                            \027[0m\027[32m@@@@@A    H@@M\027[0m\027[32m\027[1m,@;@@@@@@@@@S.\027[0m\027[32m5@@@;                              \027[0m\027[33m} » IP   : \027[0m\027[33m\027[1m" ^ (pad (UnixLabels.string_of_inet_addr (List.hd (Array.to_list ((UnixLabels.gethostbyname (UnixLabels.gethostname())).h_addr_list)))) 47) ^ "\027[0m\027[33m}
-                                          \027[0m\027[32mH@@@@@    @@@@G\027[0m\027[32m\027[1m.@@@@@@@@@H,\027[0m\027[32mi@@@@@@                              \027[0m\027[33m| » Port : \027[0m\027[33m\027[1m"^ (pad (string_of_int (!state.!port)) 47)^"\027[0m\027[33m\\
+                                          \027[0m\027[32mH@@@@@    @@@@G\027[0m\027[32m\027[1m.@@@@@@@@@H,\027[0m\027[32mi@@@@@@                              \027[0m\027[33m| » Ports → Chain: \027[0m\027[33m\027[1m"^ (pad (string_of_int (!state.!port)) 5)^"\027[0m\027[33m" ^ " | Client: \027[0m\027[33m\027[1m"^ (pad (string_of_int (!state.!client_port)) 23)^"\027[0m\027[33m" ^ "\\
                                           \027[0m\027[32m@@@@@@   @@@@@\027[0m\027[32m\027[1m M@@@@@@@B\027[0m\027[32m    H@@@@@                              \027[0m\027[33m\\                                                         /
                                          \027[0m\027[32mi@@@@@@, @@@@@\027[0m\027[32m\027[1m G@@@@@@A\027[0m\027[32m      S@@@@@                              \027[0m\027[33m}                                                         {
                                          \027[0m\027[32mA@@@@@@rS@@@#\027[0m\027[32m\027[1m #@@@@@X\027[0m\027[32m       H@@@@@S                              \027[0m\027[33m\\                 | \027[0m\027[33m\027[1mChain Information\027[0m\027[33m |                   /
@@ -196,7 +233,7 @@ let print_screen () =
                          \027[0m\027[32m:,M@@@,,      2@@ @@@ #@@@A @@@@@#2S2H@@@@@@@@@@@@@@:.2M##As.;@@@@@@@@@@@@@.     \027[0m\027[33m}                                                         {
                           \027[0m\027[32m,riGB@@@#&B@@@@@s:@@ @@@# @@@@@s S3i: #@@@@@@@@@@@::@@@@@@@@ ,5.S@@@@@@@@@@     \027[0m\027[33m\\ » Tail Node ID   : \027[0m\027[33m\027[1m"^ pad (if is_none !state.!tail_node then "N/A" else node_to_screen_print (get_tail_node())) 37^ "\027[0m\027[33m/
                               \027[0m\027[32ms@@@@@@@@@@@@;i@.#@@ &@@@@A @@@@@5 @@@@@@@@@@@ @@@@@@@@@@2A &@@@@@@@@@@G    \027[0m\027[33m}     Chain Port   : \027[0m\027[33m\027[1m"^ pad (if is_none !state.!tail_node then "N/A" else node_to_screen_print_chain_port (get_tail_node())) 37^ "\027[0m\027[33m>
-                                  \027[0m\027[32mrM@@M3;    iS2@S:@@@@@ 3@@@@@@ @@@@@@@@@@@ @@@@@@@@@@@;,@@@@@@@@@@@@    \027[0m\027[33m}     Respond Port : \027[0m\027[33m\027[1m"^ pad (if is_none !state.!tail_node then "N/A" else node_to_screen_print_listen_port (get_tail_node())) 37^ "\027[0m\027[33m}
+                                  \027[0m\027[32mrM@@M3;    iS2@S:@@@@@ 3@@@@@@ @@@@@@@@@@@ @@@@@@@@@@@;,@@@@@@@@@@@@    \027[0m\027[33m}     Respond Port : \027[0m\027[33m\027[1m"^ pad (if is_none !state.!tail_node then "N/A" else node_to_screen_print_respond_port (get_tail_node())) 37^ "\027[0m\027[33m}
                                                 \027[0m\027[32m@.@@@@@2.@@@@@@A 2h@@@@@@@@@ H@@@@@@@@@@@ @@@@@@@@@@@@    \027[0m\027[33m>                                                         /
                    \027[0m\027[32m,:  r&@@@@@@@@@@@@@@Gr.       ;@@@@h @@@@@@@@. i@@@@@@@@@h @@@@@@@@@@:  ;#@@@@@@@@@    \027[0m\027[33m|                                                         \\
                \027[0m\027[32mA@@@@2A@@@B3Sii5hM@@@@@@@@@@@9:     r#5 @@@@@@@r,A@@@@@@@@@@@@r;@@@@@@@@     5@@@@@@@@S    \027[0m\027[33m\\                   | \027[0m\027[33m\027[1mNetwork Status\027[0m\027[33m |                    /
@@ -373,7 +410,7 @@ let monitor_node (node : node) =
 
 
 
-let begin_listening_service_on_port p = 
+let begin_chain_listening_service_on_port p = 
 
   let module MSReq = MasterServiceRequest in
   let module MSRes = MasterServiceResponse in
@@ -386,19 +423,19 @@ let begin_listening_service_on_port p =
     (fun addr r w  ->
        let mconnection = (addr,r,w) in
        (*let addr_string = Address.to_string addr in*)
-       debug INFO ("Incoming connection request.");
-       debug INFO ("Waiting for initialization request.");
+       debug INFO ("Incoming chain connection request.");
+       debug INFO ("Waiting for chain init request.");
        MSReq.receive r
        >>= function
        | `Eof -> begin 
-           debug WARN ("Socket was closed by node.");
+           debug WARN ("Socket was closed by chain node.");
            return ()
          end
        | `Ok msg -> begin 
            match msg with
-           | MSReq.InitRequest((ip,port)) -> begin 
+           | MSReq.InitRequest((ip,port,(usr_liss,usr_resp))) -> begin 
                let connected_node_id = (ip,port) in
-               debug INFO ("Initialization request received.");
+               debug INFO ("Chain init request received.");
 
                if not (chain_exists()) then begin
                  (* Since there are no head nodes. Send a request indicating the start of a new replica chain *)
@@ -418,7 +455,7 @@ let begin_listening_service_on_port p =
                      if not (chain_exists()) then begin
 
                        (*(Mutex.lock state_mutex);*)
-                       let new_chain_node = (mconnection, connected_node_id) in
+                       let new_chain_node = (mconnection, connected_node_id,(usr_liss,usr_resp)) in
                        !state.head_node := Some(new_chain_node);
                        !state.tail_node := Some(new_chain_node);
                        !state.chain_size := !state.!chain_size + 1;
@@ -438,7 +475,7 @@ let begin_listening_service_on_port p =
                      end
                    end
                  | _ -> begin
-                     debug ERROR ("Got unexpected response.");
+                     debug ERROR ("Got unexpected res from chain node.");
                      return ()
                    end
                end (* Case of new chain *)
@@ -482,7 +519,7 @@ let begin_listening_service_on_port p =
                        (* Restructure the chain *)
 
                        (*(Mutex.lock state_mutex);*)
-                       let new_chain_node = (mconnection,connected_node_id) in
+                       let new_chain_node = (mconnection,connected_node_id,(usr_liss,usr_resp)) in
                        let new_curr_tail_next = Some(new_chain_node) in
                        let (tail_prev,the_tail,_) = Hashtbl.find chain tail_id in
                        Hashtbl.replace chain tail_id (tail_prev,the_tail,new_curr_tail_next);
@@ -504,7 +541,7 @@ let begin_listening_service_on_port p =
 
                      end
                    | _ -> begin
-                       debug ERROR ("Got unexpected response.");
+                       debug ERROR ("Got unexpected res from chain node.");
                        return ()
                      end
 
@@ -529,6 +566,51 @@ let begin_listening_service_on_port p =
 
 
 
+let begin_client_listening_service_on_port p = 
+
+  let module ClReq = ClientToMasterRequest in
+  let module ClRes = ClientToMasterResponse in
+
+  Tcp.Server.create
+    ~on_handler_error:`Raise
+    (Tcp.on_port p)
+    (fun addr r w  ->
+       debug INFO ("Incoming client connection request.");
+       debug INFO ("Waiting for client init request.");
+       ClReq.receive r
+       >>= function
+       | `Eof -> begin 
+           debug WARN ("Socket was closed by client.");
+           return ()
+         end
+       | `Ok msg -> begin 
+           match msg with
+           | ClReq.HeadAndTailRequest -> begin 
+              debug INFO ("Client init request received.");
+              if not (chain_exists()) then begin
+                debug INFO ("No chain. Sending client None");
+                (ClRes.send w (ClRes.HeadAndTailResponse(None)));
+                return()
+              end
+              else begin
+                debug INFO ("Sending client the Head & Tail info.");
+                (ClRes.send w (ClRes.HeadAndTailResponse(Some(get_node_liss_client_info (get_head_node()), get_node_resp_client_info (get_tail_node())))));
+                return()
+              end (* Case of existing chain *)
+            end (* Match InitReq *)
+
+         end
+
+    )
+  >>= fun server ->
+  when_should_terminate()
+  >>= fun _ ->
+  (Tcp.Server.close server)
+  >>= fun _ -> 
+  return 0
+
+
+
 (***********************************************************)
 (* MAIN                                                    *)
 (***********************************************************)
@@ -539,35 +621,13 @@ let () =
     ~readme: (fun () -> "This is the Master-Service for the DDWQ replication chain.")
     Command.Spec.(
       empty
-      +> flag "-config" (optional_with_default "DDWQ.cfg" string)
+      +> flag "--config" (optional_with_default "DDWQ.cfg" string)
         ~doc:"Path to configuration file"
     )
     (fun config () ->
 
        (Sys.command "clear")
        >>= fun _ ->
-
-
-  
-
-(*"
-        ,--,                                                 
-      ,--.'|                                                 
-   ,--,  | :                   ,---,                         
-,---.'|  : '                 ,---.'|   __  ,-.               
-|   | : _' |                 |   | : ,' ,'/ /|               
-:   : |.'  |       .--,      |   | | '  | |' |    ,--.--.    
-|   ' '  ; :     /_ ./|    ,--.__| | |  |   ,'   /       \\   
-'   |  .'. |  , ' , ' :   /   ,'   | '  :  /    .--.  .-. |  
-|   | :  | ' /___/ \\: |  .   '  /  | |  | '      \\__\\/: . .  
-'   : |  : ;  .  \\  ' |  '   ; |:  | ;  : |      ,\" .--.; |  
-|   | '  ,/    \\  ;   :  |   | '/  ' |  , ;     /  /  ,.  |  
-;   : ;--'      \\  \\  ;  |   :    :|  ---'     ;  :   .'   \\ 
-|   ,/           :  \\  \\  \\   \\  /             |  ,     .-./ 
-'---'             \\  ' ;   `----'               `--`---'     
-                   `--`                                      
-"*)
-
 
        let get_port_number_from_string line =
          try ( let x = int_of_string line in if x < 1024 || x > 49151 then raise (Failure "") else x ) with 
@@ -579,14 +639,22 @@ let () =
        let process_config_file_line s =
          match Str.split (Str.regexp_string ":") s with
          | [prefix; value] -> begin
-             if prefix = "port" then begin
+             if prefix = "chainport" then begin
                (*(Mutex.lock state_mutex);*)
                (!state.port := (get_port_number_from_string value));
                (*(Mutex.unlock state_mutex)*)
              end
              else begin
-               debug FATAL ("Invalid configuration prefix.");
-               failwith "Configuration file not formatted propperly"  
+                if prefix = "clientport" then begin
+                 (*(Mutex.lock state_mutex);*)
+                 (!state.client_port := (get_port_number_from_string value));
+                 (*(Mutex.unlock state_mutex)*)
+                end
+                else begin
+                  debug FATAL ("Invalid configuration prefix.");
+                  failwith "Configuration file not formatted propperly"  
+                end
+               
              end
            end
          | _               -> begin
@@ -612,6 +680,7 @@ let () =
               debug INFO "Config file loaded.";
               (*(Mutex.lock state_mutex);*)
               let port_num = !state.!port in
+              let client_port_num = !state.!client_port in
               (*(Mutex.unlock state_mutex);*)
               debug NONE ("Starting Hydra on port: " ^ (string_of_int port_num));
 
@@ -627,7 +696,8 @@ let () =
               Deferred.all [
                 (*((after (Core.Std.sec 150.0)) >>= fun _ -> (Ivar.fill_if_empty should_terminate "Timed out"); (return 0)) ;*)
 
-                (begin_listening_service_on_port port_num) ;
+                (begin_chain_listening_service_on_port port_num) ;
+                (begin_client_listening_service_on_port client_port_num);
                 ((when_should_terminate()) >>= fun _ -> return 0) ;
                 never()
               ] >>= fun  x -> return x 
