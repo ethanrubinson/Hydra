@@ -46,6 +46,7 @@ module Work_Exec = struct
     let work_result = (input_all chan) in
     ignore(Sys.command (("rm " ^ dir ^ (fst input))));
     ignore(Sys.command ("rm " ^ dir ^ "work.out"));
+    ignore(Sys.command ("rmdir " ^ dir));
     work_result
 
 

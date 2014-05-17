@@ -18,9 +18,9 @@ let print_main_screen () =
              888    888 888  888 888  888 888    .d888888
              888    888 Y88b 888 Y88b 888 888    888  888
              888    888  \"Y88888  \"Y88888 888    \"Y888888
-                              888                          
-                         Y8b d88P                          
-                          \"Y88P\"               
+                            888                          
+                       Y8b d88P                          
+                        \"Y88P\"               
                                                      
                                                      
               .d8888b.  888 d8b                   888
@@ -116,6 +116,7 @@ let rec get_where_to_connect_from_master master_ip master_port () =
 
 
 let rec start_client m_ip m_port () = 
+  Sys.command "clear" >>= fun _ ->
   print_main_screen ();
 
   debug NONE "Specify a 'worktype' identifier from the list above [\"quit\" to exit] :\n";

@@ -6,4 +6,4 @@ let minisleep (sec: float) =
 let rec fact x =
     if x <= 1 then 1 else x * fact (x - 1)
 
-let () = (minisleep 30.0); print_endline (string_of_int (fact 4))
+let () = (minisleep 2.0); print_endline (string_of_int (fact 4))
